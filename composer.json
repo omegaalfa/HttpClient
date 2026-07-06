@@ -1,0 +1,53 @@
+{
+  "name": "omegaalfa/http-client",
+  "description": "A lightweight, high-performance asynchronous HTTP client for modern PHP applications powered by FiberEventLoop.",
+  "type": "library",
+  "license": "MIT",
+  "keywords": [
+    "event-loop",
+    "fiber",
+    "asynchronous",
+    "async",
+    "coroutine",
+    "non-blocking",
+    "io",
+    "tcp",
+    "concurrent"
+  ],
+  "authors": [
+    {
+      "name": "wrt",
+      "email": "webdesenvolver.agenda@gmail.com"
+    }
+  ],
+  "require": {
+    "php": ">=8.4",
+    "ext-sockets": "*",
+    "omegaalfa/fiber-event-loop": "dev-main"
+  },
+  "autoload": {
+    "files": [
+      "src/Http/functions.php"
+    ],
+    "psr-4": {
+      "Omegaalfa\\HttpClient\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Tests\\Omegaalfa\\HttpClient\\": "tests/"
+    }
+  },
+  "minimum-stability": "dev",
+  "require-dev": {
+    "roave/security-advisories": "dev-latest",
+    "phpunit/phpunit": "^11.5"
+  },
+  "scripts": {
+    "test": "phpunit -c phpunit.xml",
+    "test-coverage": "phpunit -c phpunit.xml --coverage-html=coverage --coverage-text",
+    "test-verbose": "phpunit -c phpunit.xml --verbose",
+    "test-filter": "phpunit -c phpunit.xml --filter",
+    "test-stop-on-failure": "phpunit -c phpunit.xml --stop-on-failure"
+  }
+}
