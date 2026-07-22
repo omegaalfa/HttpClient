@@ -23,7 +23,8 @@
   "require": {
     "php": ">=8.4",
     "ext-sockets": "*",
-    "omegaalfa/fiber-event-loop": "dev-main"
+    "omegaalfa/fiber-event-loop": "dev-main",
+    "guzzlehttp/guzzle": "^7.9"
   },
   "autoload": {
     "files": [

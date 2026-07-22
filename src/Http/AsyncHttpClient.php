@@ -636,8 +636,9 @@ final class AsyncHttpClient
         $offset = 0;
         $deadlineNs = hrtime(true) + (int) ($options->totalTimeout * 1_000_000_000);
         $writeDeadline = hrtime(true) + (int) ($options->writeTimeout * 1_000_000_000);
+        $payloadLength = strlen($payload);
 
-        while ($offset < strlen($payload)) {
+        while ($offset < $payloadLength) {
             $this->ensureTotalTimeout($deadlineNs);
             if (hrtime(true) >= $writeDeadline) {
                 throw new TimeoutException('Write timed out');
@@ -645,7 +646,8 @@ final class AsyncHttpClient
 
             $remainingWriteSeconds = max(0.0, ($writeDeadline - hrtime(true)) / 1_000_000_000);
             $this->waitForSocket($socket, false, true, $remainingWriteSeconds, 'Write timed out', $deadlineNs);
-            $written = @fwrite($socket, substr($payload, $offset));
+            $chunk = substr($payload, $offset, 8192);
+            $written = @fwrite($socket, $chunk);
 
             if ($written === false) {
                 throw new ConnectionException('Failed to write request payload');
