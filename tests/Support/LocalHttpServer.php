@@ -27,7 +27,7 @@ final class LocalHttpServer
     {
         $phpBinary = PHP_BINARY;
         $command = sprintf(
-            '%s -S %s:%d %s',
+            '%s -n -S %s:%d %s',
             escapeshellarg($phpBinary),
             $this->host,
             $this->port,

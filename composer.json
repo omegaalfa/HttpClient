@@ -23,8 +23,7 @@
   "require": {
     "php": ">=8.4",
     "ext-sockets": "*",
-    "omegaalfa/fiber-event-loop": "dev-main",
-    "guzzlehttp/guzzle": "^7.9"
+    "omegaalfa/fiber-event-loop": "dev-main"
   },
   "autoload": {
     "files": [
@@ -39,16 +38,17 @@
       "Tests\\Omegaalfa\\HttpClient\\": "tests/"
     }
   },
-  "minimum-stability": "dev",
+  "prefer-stable": true,
   "require-dev": {
+    "guzzlehttp/guzzle": "^7.15.1",
     "roave/security-advisories": "dev-latest",
     "phpunit/phpunit": "^11.5"
   },
   "scripts": {
-    "test": "phpunit -c phpunit.xml",
-    "test-coverage": "phpunit -c phpunit.xml --coverage-html=coverage --coverage-text",
-    "test-verbose": "phpunit -c phpunit.xml --verbose",
-    "test-filter": "phpunit -c phpunit.xml --filter",
-    "test-stop-on-failure": "phpunit -c phpunit.xml --stop-on-failure"
+    "test": "phpunit -c phpunit.xml.dist",
+    "test-coverage": "phpunit -c phpunit.xml.dist --coverage-html=coverage --coverage-text",
+    "test-verbose": "phpunit -c phpunit.xml.dist --display-all-issues",
+    "test-filter": "phpunit -c phpunit.xml.dist --filter",
+    "test-stop-on-failure": "phpunit -c phpunit.xml.dist --stop-on-failure"
   }
 }

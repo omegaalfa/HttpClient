@@ -669,8 +669,9 @@ final class AsyncHttpClient
      */
     private function readResponse($socket, RequestOptions $options): array
     {
-        $buffer = '';
-        $headerEndPos = null;
+        $headerBuffer = '';
+        $body = '';
+        $headers = null;
         $contentLength = null;
         $chunked = false;
         $deadlineNs = hrtime(true) + (int) ($options->totalTimeout * 1_000_000_000);
@@ -699,52 +700,56 @@ final class AsyncHttpClient
                 continue;
             }
 
-            $buffer .= $chunk;
             $readDeadline = hrtime(true) + (int) ($options->readTimeout * 1_000_000_000);
 
-            if ($headerEndPos === null) {
-                $position = strpos($buffer, "\r\n\r\n");
-                if ($position !== false) {
-                    $headerEndPos = $position + 4;
-                    $headers = Headers::fromRaw(substr($buffer, 0, $position));
-                    $contentLengthHeader = $headers->get('Content-Length');
-                    $contentLength = $contentLengthHeader !== null ? (int) $contentLengthHeader : null;
-                    $chunked = str_contains(strtolower($headers->get('Transfer-Encoding', '') ?? ''), 'chunked');
+            if ($headers === null) {
+                $headerBuffer .= $chunk;
+                $position = strpos($headerBuffer, "\r\n\r\n");
+                if ($position === false) {
+                    continue;
                 }
+
+                $rawHeaders = substr($headerBuffer, 0, $position);
+                $body = substr($headerBuffer, $position + 4);
+                $headerBuffer = $rawHeaders;
+                $headers = Headers::fromRaw($rawHeaders);
+                $contentLengthHeader = $headers->get('Content-Length');
+                $contentLength = $contentLengthHeader !== null ? max(0, (int) $contentLengthHeader) : null;
+                $chunked = str_contains(strtolower((string) $headers->get('Transfer-Encoding', '')), 'chunked');
+            } else {
+                $body .= $chunk;
             }
 
-            if ($headerEndPos !== null) {
-                $body = substr($buffer, $headerEndPos);
-                if ($contentLength !== null && strlen($body) >= $contentLength) {
-                    $buffer = substr($buffer, 0, $headerEndPos + $contentLength);
-                    break;
+            if ($contentLength !== null && strlen($body) >= $contentLength) {
+                if (strlen($body) !== $contentLength) {
+                    $body = substr($body, 0, $contentLength);
                 }
+                break;
+            }
 
-                if ($chunked && str_contains($body, "\r\n0\r\n\r\n")) {
-                    break;
-                }
+            if ($chunked && str_contains($body, "\r\n0\r\n\r\n")) {
+                break;
             }
         }
 
-        $position = strpos($buffer, "\r\n\r\n");
-        if ($position === false) {
+        if ($headers === null) {
             throw new ConnectionException('Invalid HTTP response: headers not found');
         }
 
-        $statusLine = strtok(substr($buffer, 0, $position), "\r\n") ?: '';
+        $statusLine = strtok($headerBuffer, "\r\n") ?: '';
         if (preg_match('/HTTP\/\d\.\d\s+(\d{3})/', $statusLine, $matches) !== 1) {
             throw new ConnectionException('Invalid HTTP response status line');
         }
 
-        $status = (int) $matches[1];
-        $headers = Headers::fromRaw(substr($buffer, 0, $position));
-        $body = substr($buffer, $position + 4);
+        if ($contentLength !== null && strlen($body) < $contentLength) {
+            throw new ConnectionException('Incomplete HTTP response body');
+        }
 
-        if (str_contains(strtolower($headers->get('Transfer-Encoding', '') ?? ''), 'chunked')) {
+        if ($chunked) {
             $body = $this->decodeChunkedBody($body);
         }
 
-        return [$status, $headers, $body];
+        return [(int) $matches[1], $headers, $body];
     }
 
     /**

@@ -241,6 +241,56 @@ final class AsyncHttpClientInternalTest extends TestCase
         self::assertSame('Wikipedia', $body);
     }
 
+    public function testReadResponseParsesFragmentedLargeBody(): void
+    {
+        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        self::assertNotFalse($sockets);
+
+        [$readSocket, $writeSocket] = $sockets;
+        stream_set_chunk_size($readSocket, 1024);
+
+        $expected = str_repeat('payload-', 12_800);
+        $response = "HTTP/1.1 200 OK\r\nContent-Length: " . strlen($expected) . "\r\nX-Large: yes\r\n\r\n" . $expected;
+        self::assertSame(strlen($response), fwrite($writeSocket, $response));
+        fclose($writeSocket);
+
+        $client = new AsyncHttpClient();
+        $options = (new RequestOptions())
+            ->withReadTimeout(1.0)
+            ->withTotalTimeout(2.0);
+
+        [$status, $headers, $body] = $this->invokePrivate($client, 'readResponse', $readSocket, $options);
+        fclose($readSocket);
+
+        self::assertSame(200, $status);
+        self::assertSame('yes', $headers->get('X-Large'));
+        self::assertSame($expected, $body);
+    }
+
+    public function testReadResponseRejectsIncompleteContentLengthBody(): void
+    {
+        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        self::assertNotFalse($sockets);
+
+        [$readSocket, $writeSocket] = $sockets;
+        fwrite($writeSocket, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort");
+        fclose($writeSocket);
+
+        $this->expectException(\Omegaalfa\HttpClient\Http\Exceptions\ConnectionException::class);
+        $this->expectExceptionMessage('Incomplete HTTP response body');
+
+        $client = new AsyncHttpClient();
+        $options = (new RequestOptions())
+            ->withReadTimeout(1.0)
+            ->withTotalTimeout(1.0);
+
+        try {
+            $this->invokePrivate($client, 'readResponse', $readSocket, $options);
+        } finally {
+            fclose($readSocket);
+        }
+    }
+
     private function invokePrivate(object $object, string $method, mixed ...$args): mixed
     {
         $reflection = new ReflectionClass($object);

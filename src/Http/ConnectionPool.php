@@ -37,7 +37,7 @@ final class ConnectionPool
                 continue;
             }
 
-            if (feof($socket)) {
+            if (!$this->isReusable($socket)) {
                 fclose($socket);
                 continue;
             }
@@ -104,6 +104,26 @@ final class ConnectionPool
                 }
             }
         }
+    }
+
+    /**
+     * A readable idle socket contains leftover bytes or was closed by the peer.
+     * Neither case is safe to reuse.
+     *
+     * @param resource $socket
+     */
+    private function isReusable($socket): bool
+    {
+        if (feof($socket)) {
+            return false;
+        }
+
+        $read = [$socket];
+        $write = [];
+        $except = [];
+        $ready = @stream_select($read, $write, $except, 0, 0);
+
+        return $ready === 0;
     }
 
     private function evictIfNeeded(): void
