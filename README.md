@@ -14,7 +14,7 @@ Esta biblioteca fornece:
 - Controle de timeout, retries, backoff e redirects
 - Concorrência com `awaitAll()`, `awaitAny()`, `race()`, `awaitSettled()`, `parallel()` e `concurrent()`
 - Proxy HTTP e túnel HTTPS via CONNECT
-- Reuso básico de conexões com pool por origem
+- Reuso básico de conexões com pool por origem, habilitado explicitamente com `withKeepAlive(true)`
 
 ## Requisitos
 
@@ -27,6 +27,9 @@ Esta biblioteca fornece:
 ```bash
 composer require omegaalfa/http-client
 ```
+
+> **Nota sobre estabilidade:** enquanto `omegaalfa/fiber-event-loop` estiver disponível apenas como
+> `dev-main`, o projeto consumidor poderá precisar permitir dependências de desenvolvimento em sua configuração do Composer.
 
 ## Início rápido
 
@@ -58,7 +61,7 @@ O pacote trabalha com estes blocos:
 - `Headers`: coleção case-insensitive multi-valor
 - `CookieJar`: armazenamento e envio automático de cookies
 - `MultipartBuilder`: construção de multipart/form-data
-- `ConcurrentExecutor`: primitives de concorrência
+- `ConcurrentExecutor`: primitivas de concorrência
 - `ConnectionPool`: reuso de sockets por origem
 - `HttpException`, `TimeoutException`, `ConnectionException`: falhas do domínio
 
@@ -149,6 +152,10 @@ readTimeout(float $seconds)
 writeTimeout(float $seconds)
 totalTimeout(float $seconds)
 ```
+
+`withJson(false)` desativa apenas a inclusão automática dos headers JSON.
+Bodies em array continuam sendo serializados como JSON, exceto quando o
+`Content-Type` for `application/x-www-form-urlencoded`.
 
 ## Exemplos de uso por cenário
 
@@ -393,6 +400,11 @@ $client = (new AsyncHttpClient())
 $response = await($client->get('https://jsonplaceholder.typicode.com/todos/1'));
 ```
 
+`withRetries(3)` permite até três novas tentativas depois da chamada inicial,
+totalizando no máximo quatro chamadas. Falhas de conexão, timeouts e respostas
+5xx também podem repetir métodos não idempotentes, como `POST`; habilite retries
+nesses casos somente quando a operação puder ser executada novamente com segurança.
+
 ### 17. Retry e backoff exponencial
 
 ```php
@@ -466,6 +478,10 @@ $client = (new AsyncHttpClient())
 
 $response = await($client->get('https://example.com'));
 ```
+
+> **Segurança:** mantenha `withVerifySSL(true)` em produção. Usar
+> `withVerifySSL(false)` desativa a validação do certificado e do hostname e
+> deve ser restrito a ambientes locais controlados.
 
 ## Referência rápida por classe
 
@@ -599,16 +615,20 @@ try {
 
 ## Comportamentos importantes
 
-- Body em array vira JSON por padrão.
+- Body em array vira JSON por padrão, mesmo com `withJson(false)`; essa opção controla a inclusão automática dos headers JSON.
 - Para enviar `application/x-www-form-urlencoded`, defina o header explicitamente.
-- Cookies recebidos por `Set-Cookie` são persistidos no `CookieJar` e reenviados automaticamente quando compatíveis com host/path/secure.
+- Cookies recebidos por `Set-Cookie` são persistidos no `CookieJar` e filtrados por domínio, path, expiração e flag `Secure`.
 - Redirects 301, 302 e 303 podem converter o método para GET, seguindo o comportamento implementado.
-- Retries podem ocorrer em timeout, conexão, erros 5xx e métodos idempotentes (`GET`, `HEAD`, `OPTIONS`).
+- `withRetries(N)` configura até `N` novas tentativas além da chamada inicial.
+- Retries por timeout, falha de conexão ou resposta 5xx podem repetir inclusive métodos não idempotentes.
 - `withProxy()` suporta HTTP direto e CONNECT para HTTPS.
+- O keep-alive é desabilitado por padrão; use `withKeepAlive(true)` para habilitar o pool.
 
 ## Limitações atuais
 
 - O pool é básico e ainda não possui TTL, health-check ativo ou métricas por origem.
+- O `CookieJar` usa correspondência simples por sufixo de domínio e ainda não distingue cookies host-only.
+- Retries não implementam uma política automática de segurança/idempotência por método.
 - Não há streaming de resposta/upload para zero-copy em payloads grandes.
 - Não há HTTP/2, HTTP/3, WebSocket ou SSE nativos ainda.
 
