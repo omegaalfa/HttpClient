@@ -23,7 +23,7 @@
   "require": {
     "php": ">=8.4",
     "ext-sockets": "*",
-    "omegaalfa/fiber-event-loop": "v1.0.0"
+    "omegaalfa/fiber-event-loop": "^1.0"
   },
   "autoload": {
     "files": [

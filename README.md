@@ -115,6 +115,15 @@ put(string $url, mixed $body = null, array $headers = [], array $files = [], ?Mu
 patch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
 delete(string $url, array $query = [], array $headers = []): Future
 request(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null): Future
+streamGet(string $url, array $query = [], array $headers = []): Future
+streamPost(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+streamPut(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+streamPatch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+streamDelete(string $url, array $query = [], array $headers = []): Future
+streamRequest(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null): Future
+streamSseGet(string $url, array $query = [], array $headers = [], bool $requireDone = true): Future
+streamSsePost(string $url, array $query = [], array $headers = [], bool $requireDone = true): Future
+streamSseRequest(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null, bool $requireDone = true): Future
 ```
 
 ### Concorrência
@@ -156,6 +165,84 @@ totalTimeout(float $seconds)
 `withJson(false)` desativa apenas a inclusão automática dos headers JSON.
 Bodies em array continuam sendo serializados como JSON, exceto quando o
 `Content-Type` for `application/x-www-form-urlencoded`.
+
+## Streaming real e SSE
+
+Quando você quer começar a processar os dados antes de a resposta terminar, use
+as novas APIs de streaming. O cliente continua aceitando as mesmas opções de
+headers, auth, proxy, timeout e retry, mas a resposta volta como um objeto que
+lê os bytes aos poucos.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+require __DIR__ . '/vendor/autoload.php';
+
+use Omegaalfa\HttpClient\Http\AsyncHttpClient;
+use function Omegaalfa\HttpClient\Http\await;
+
+$client = new AsyncHttpClient();
+$stream = await($client->streamGet('https://example.com/stream'));
+
+while (($chunk = $stream->readChunk()) !== null) {
+        echo $chunk;
+}
+```
+
+Para SSE, a biblioteca também faz o parsing linha por linha e entrega eventos já
+estruturados:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+require __DIR__ . '/vendor/autoload.php';
+
+use Omegaalfa\HttpClient\Http\AsyncHttpClient;
+use function Omegaalfa\HttpClient\Http\await;
+
+$client = new AsyncHttpClient();
+$sse = await($client->streamSseGet('https://example.com/events'));
+
+while (($event = $sse->nextEvent()) !== null) {
+        if ($event->done()) {
+                break;
+        }
+
+        print_r($event->json());
+}
+
+// Em cancelamento antecipado, feche explicitamente para liberar o socket.
+$sse = await($client->streamSsePost('https://example.com/events', body: ['prompt' => 'demo']));
+try {
+    foreach ($sse as $event) {
+        echo $event->data() . PHP_EOL;
+        break;
+    }
+} finally {
+    $sse->close();
+}
+```
+
+Em muitos streams compatíveis com chat ou IA, a mensagem final vem como
+`data: [DONE]`. Esse marcador fecha o ciclo de forma limpa e evita que você
+consuma o stream até o final sem precisar.
+
+Se o stream terminar sem esse marcador e você usar o modo padrão, a biblioteca
+lança uma exceção para avisar que a resposta terminou cedo demais. Se a carga
+útil vier como JSON inválido, o erro mostra um trecho do payload para ajudar no
+debug.
+
+Resumo mental:
+
+- `request()` e `get()` continuam sendo a escolha certa para respostas comuns
+    e totalmente materializadas.
+- `streamGet()` e `streamRequest()` são para ler bytes à medida que chegam.
+- `streamSseGet()`, `streamSsePost()` e `streamSseRequest()` são para SSE e retornam eventos em vez
+    de texto cru.
 
 ## Exemplos de uso por cenário
 
@@ -629,8 +716,8 @@ try {
 - O pool é básico e ainda não possui TTL, health-check ativo ou métricas por origem.
 - O `CookieJar` usa correspondência simples por sufixo de domínio e ainda não distingue cookies host-only.
 - Retries não implementam uma política automática de segurança/idempotência por método.
-- Não há streaming de resposta/upload para zero-copy em payloads grandes.
-- Não há HTTP/2, HTTP/3, WebSocket ou SSE nativos ainda.
+- Ainda não há streaming de upload zero-copy para payloads grandes.
+- Não há HTTP/2, HTTP/3 ou WebSocket nativos ainda.
 
 ## Testes
 

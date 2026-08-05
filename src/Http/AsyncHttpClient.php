@@ -24,7 +24,8 @@ final class AsyncHttpClient
         ?FiberEventLoop $loop = null,
         ?RequestOptions $options = null,
         ?ConnectionPool $connectionPool = null
-    ) {
+    )
+    {
         $this->loop = $loop ?? new FiberEventLoop();
         $this->options = $options ?? new RequestOptions();
         $this->connectionPool = $connectionPool ?? new ConnectionPool();
@@ -57,14 +58,15 @@ final class AsyncHttpClient
     }
 
     public function request(
-        string $method,
-        string $url,
-        array $query = [],
-        array $headers = [],
-        mixed $body = null,
-        array $files = [],
+        string            $method,
+        string            $url,
+        array             $query = [],
+        array             $headers = [],
+        mixed             $body = null,
+        array             $files = [],
         ?MultipartBuilder $multipart = null
-    ): Future {
+    ): Future
+    {
         $request = new Request(
             strtoupper($method),
             $this->resolveUrl($url),
@@ -77,6 +79,117 @@ final class AsyncHttpClient
         );
 
         return $this->loop->async(fn() => $this->sendWithRetries($request));
+    }
+
+    public function streamGet(string $url, array $query = [], array $headers = []): Future
+    {
+        return $this->streamRequest('GET', $url, query: $query, headers: $headers);
+    }
+
+    public function streamPost(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+    {
+        return $this->streamRequest('POST', $url, headers: $headers, body: $body, files: $files, multipart: $multipart);
+    }
+
+    public function streamPut(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+    {
+        return $this->streamRequest('PUT', $url, headers: $headers, body: $body, files: $files, multipart: $multipart);
+    }
+
+    public function streamPatch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+    {
+        return $this->streamRequest('PATCH', $url, headers: $headers, body: $body, files: $files, multipart: $multipart);
+    }
+
+    public function streamDelete(string $url, array $query = [], array $headers = []): Future
+    {
+        return $this->streamRequest('DELETE', $url, query: $query, headers: $headers);
+    }
+
+    public function streamRequest(
+        string            $method,
+        string            $url,
+        array             $query = [],
+        array             $headers = [],
+        mixed             $body = null,
+        array             $files = [],
+        ?MultipartBuilder $multipart = null
+    ): Future
+    {
+        $request = new Request(
+            strtoupper($method),
+            $this->resolveUrl($url),
+            Headers::from($this->options->headers)->merge($headers),
+            $body,
+            $query,
+            $files,
+            $multipart,
+            $this->options
+        );
+
+        return $this->loop->async(fn() => $this->sendStreamWithRetries($request));
+    }
+
+    public function streamSseGet(
+        string $url,
+        array $query = [],
+        array $headers = [],
+        bool $requireDone = false,
+        ?callable $completionDetector = null
+    ): Future
+    {
+        return $this->streamSseRequest(
+            'GET',
+            url: $url,
+            query: $query,
+            headers: $headers,
+            requireDone: $requireDone,
+            completionDetector: $completionDetector,
+        );
+    }
+
+    public function streamSsePost(
+        string $url,
+        mixed  $body = null,
+        array  $headers = [],
+        bool   $requireDone = false,
+        ?callable $completionDetector = null,
+    ): Future
+    {
+        return $this->streamSseRequest(
+            'POST',
+            $url,
+            headers: $headers,
+            body: $body,
+            requireDone: $requireDone,
+            completionDetector: $completionDetector,
+        );
+    }
+
+    public function streamSseRequest(
+        string            $method,
+        string            $url,
+        array             $query = [],
+        array             $headers = [],
+        mixed             $body = null,
+        array             $files = [],
+        ?MultipartBuilder $multipart = null,
+        bool              $requireDone = false,
+        ?callable         $completionDetector = null
+    ): Future
+    {
+        $request = new Request(
+            strtoupper($method),
+            $this->resolveUrl($url),
+            Headers::from($this->options->headers)->merge($headers),
+            $body,
+            $query,
+            $files,
+            $multipart,
+            $this->options
+        );
+
+        return $this->loop->async(fn() => $this->sendSseStreamWithRetries($request, $requireDone, $completionDetector));
     }
 
     public function concurrent(array $tasks): Future
@@ -227,6 +340,61 @@ final class AsyncHttpClient
         return rtrim($this->options->baseUrl, '/') . '/' . ltrim($url, '/');
     }
 
+    private function sendStreamWithRetries(Request $request): StreamResponse
+    {
+        $attempt = 0;
+        $maxAttempts = $request->options?->retries ?? 0;
+
+        do {
+            $attempt++;
+
+            try {
+                $response = $this->sendStream($request, $request->options?->followRedirects ?? 0);
+
+                if ($response->status() >= 500 && $attempt <= $maxAttempts) {
+                    $exception = new HttpException(
+                        'HTTP request failed with status ' . $response->status(),
+                        $request
+                    );
+
+                    if ($this->shouldRetry($request, $exception)) {
+                        $response->close();
+                        $this->sleepRetryDelay($request, $attempt);
+                        continue;
+                    }
+                }
+
+                return $response;
+            } catch (HttpException|TimeoutException|ConnectionException $exception) {
+                if ($attempt > $maxAttempts || !$this->shouldRetry($request, $exception)) {
+                    throw $exception;
+                }
+
+                $this->sleepRetryDelay($request, $attempt);
+            }
+        } while (true);
+    }
+
+    private function sendSseStreamWithRetries(Request $request, bool $requireDone, ?callable $completionDetector = null): SseStream
+    {
+        return new SseStream($this->sendStreamWithRetries($request), new SseParser(), $requireDone, $completionDetector);
+    }
+
+    public static function doneMarkerCompletionDetector(string $marker = '[DONE]'): callable
+    {
+        return static fn(SseEvent $event): bool => trim($event->data()) === $marker;
+    }
+
+    private function sleepRetryDelay(Request $request, int $attempt): void
+    {
+        $delayMs = $request->options?->retryDelayMs ?? 100;
+        if ($request->options?->exponentialBackoff) {
+            $delayMs *= 2 ** ($attempt - 1);
+        }
+
+        $this->loop->sleep($delayMs / 1000);
+    }
+
     private function sendWithRetries(Request $request): Response
     {
         $attempt = 0;
@@ -274,21 +442,24 @@ final class AsyncHttpClient
 
     private function shouldRetry(Request $request, HttpException $exception): bool
     {
+        $isIdempotent = in_array($request->method, ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE'], true);
+
         if ($exception instanceof TimeoutException || $exception instanceof ConnectionException) {
-            return true;
+            return $isIdempotent;
         }
 
         $response = $exception->response();
         if ($response !== null && $response->status() >= 500) {
-            return true;
+            return $isIdempotent;
         }
 
-        return in_array($request->method, ['GET', 'HEAD', 'OPTIONS'], true);
+        return $isIdempotent;
     }
 
-    private function send(Request $request, int $redirectsRemaining): Response
+    private function sendStream(Request $request, int $redirectsRemaining): StreamResponse
     {
         $options = $request->options ?? $this->options;
+        $totalDeadlineNs = hrtime(true) + (int)($options->totalTimeout * 1_000_000_000);
         $prepared = $this->prepareRequest($request, $options);
         $url = parse_url($prepared['url']);
 
@@ -298,29 +469,100 @@ final class AsyncHttpClient
 
         $scheme = strtolower($url['scheme'] ?? 'http');
         $host = $url['host'];
-        $port = (int) ($url['port'] ?? ($scheme === 'https' ? 443 : 80));
+        $port = (int)($url['port'] ?? ($scheme === 'https' ? 443 : 80));
         $path = ($url['path'] ?? '/') . (isset($url['query']) ? '?' . $url['query'] : '');
         $requestTarget = ($options->proxy !== null && $scheme === 'http')
             ? $prepared['url']
             : $path;
         $poolKey = $this->connectionPoolKey($scheme, $host, $port, $options);
-        $socket = $this->openSocket($scheme, $host, $port, $options, $poolKey);
+        $socket = $this->openSocket($scheme, $host, $port, $options, $poolKey, $totalDeadlineNs);
         $keepAlive = false;
         $poolable = !($options->proxy !== null && $scheme === 'https');
 
         try {
             $payload = $this->buildRequestPayload($prepared['method'], $requestTarget, $prepared['headers'], $prepared['body']);
-            $this->writePayload($socket, $payload, $options);
-            [$status, $headers, $body] = $this->readResponse($socket, $options);
+            $this->writePayload($socket, $payload, $options, $totalDeadlineNs);
+            [$status, $headers, $bodyBuffer, $contentLength, $chunked] = $this->readResponseHead($socket, $options, $totalDeadlineNs);
 
-            $connectionHeader = strtolower((string) ($headers->get('Connection') ?? ''));
+            $connectionHeader = strtolower((string)($headers->get('Connection') ?? ''));
             $keepAlive = $options->keepAlive && $connectionHeader !== 'close';
 
             $options->cookieJar->storeFromHeaders($headers, $host);
             $cookies = $this->extractCookies($headers);
 
             if ($redirectsRemaining > 0 && $this->isRedirect($status) && $headers->has('Location')) {
-                $location = $this->resolveRedirectUrl($prepared['url'], (string) $headers->get('Location'));
+                $location = $this->resolveRedirectUrl($prepared['url'], (string)$headers->get('Location'));
+                $redirectedRequest = $request->withUrl($location);
+
+                if (in_array($status, [301, 302, 303], true) && $request->method !== 'GET') {
+                    $redirectedRequest = new Request('GET', $location, $request->headers, null, [], [], null, $options);
+                }
+
+                $this->connectionPool->release($socket, false, $poolKey);
+                return $this->sendStream($redirectedRequest, $redirectsRemaining - 1);
+            }
+
+            return new StreamResponse(
+                $this->loop,
+                $this->connectionPool,
+                $socket,
+                $options,
+                $poolKey,
+                $keepAlive && $poolable,
+                $status,
+                $headers,
+                $cookies,
+                false,
+                $bodyBuffer,
+                $chunked,
+                $contentLength,
+                $totalDeadlineNs
+            );
+        } catch (\Throwable $exception) {
+            if (is_resource($socket)) {
+                $this->connectionPool->release($socket, false, $poolKey);
+            }
+
+            throw $exception;
+        }
+    }
+
+    private function send(Request $request, int $redirectsRemaining): Response
+    {
+        $options = $request->options ?? $this->options;
+        $totalDeadlineNs = hrtime(true) + (int)($options->totalTimeout * 1_000_000_000);
+        $prepared = $this->prepareRequest($request, $options);
+        $url = parse_url($prepared['url']);
+
+        if ($url === false || !isset($url['host'])) {
+            throw new ConnectionException('Invalid request URL', $request);
+        }
+
+        $scheme = strtolower($url['scheme'] ?? 'http');
+        $host = $url['host'];
+        $port = (int)($url['port'] ?? ($scheme === 'https' ? 443 : 80));
+        $path = ($url['path'] ?? '/') . (isset($url['query']) ? '?' . $url['query'] : '');
+        $requestTarget = ($options->proxy !== null && $scheme === 'http')
+            ? $prepared['url']
+            : $path;
+        $poolKey = $this->connectionPoolKey($scheme, $host, $port, $options);
+        $socket = $this->openSocket($scheme, $host, $port, $options, $poolKey, $totalDeadlineNs);
+        $keepAlive = false;
+        $poolable = !($options->proxy !== null && $scheme === 'https');
+
+        try {
+            $payload = $this->buildRequestPayload($prepared['method'], $requestTarget, $prepared['headers'], $prepared['body']);
+            $this->writePayload($socket, $payload, $options, $totalDeadlineNs);
+            [$status, $headers, $body] = $this->readResponse($socket, $options, $totalDeadlineNs);
+
+            $connectionHeader = strtolower((string)($headers->get('Connection') ?? ''));
+            $keepAlive = $options->keepAlive && $connectionHeader !== 'close';
+
+            $options->cookieJar->storeFromHeaders($headers, $host);
+            $cookies = $this->extractCookies($headers);
+
+            if ($redirectsRemaining > 0 && $this->isRedirect($status) && $headers->has('Location')) {
+                $location = $this->resolveRedirectUrl($prepared['url'], (string)$headers->get('Location'));
                 $redirectedRequest = $request->withUrl($location);
 
                 if (in_array($status, [301, 302, 303], true) && $request->method !== 'GET') {
@@ -379,12 +621,12 @@ final class AsyncHttpClient
         if ($request->multipart !== null || $request->files !== []) {
             $multipart = $request->multipart ?? MultipartBuilder::make();
             foreach ($request->files as $name => $filePath) {
-                $multipart = $multipart->file((string) $name, (string) $filePath);
+                $multipart = $multipart->file((string)$name, (string)$filePath);
             }
 
             if (is_array($request->body)) {
                 foreach ($request->body as $name => $value) {
-                    $multipart = $multipart->field((string) $name, is_scalar($value) || $value === null ? $value : json_encode($value));
+                    $multipart = $multipart->field((string)$name, is_scalar($value) || $value === null ? $value : json_encode($value));
                 }
             }
 
@@ -413,7 +655,7 @@ final class AsyncHttpClient
         }
 
         if ($body !== '') {
-            $headers->set('Content-Length', (string) strlen($body));
+            $headers->set('Content-Length', (string)strlen($body));
         }
 
         return [
@@ -437,7 +679,7 @@ final class AsyncHttpClient
     /**
      * @return resource
      */
-    private function openSocket(string $scheme, string $host, int $port, RequestOptions $options, string $poolKey)
+    private function openSocket(string $scheme, string $host, int $port, RequestOptions $options, string $poolKey, ?int $totalDeadlineNs = null)
     {
         $connectHost = $host;
         $connectPort = $port;
@@ -495,7 +737,7 @@ final class AsyncHttpClient
         stream_set_read_buffer($socket, 0);
         stream_set_write_buffer($socket, 0);
 
-        $deadlineNs = hrtime(true) + (int) ($options->totalTimeout * 1_000_000_000);
+        $deadlineNs = $totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
         if ($connectScheme !== 'https') {
             $this->waitForSocket($socket, false, true, $options->connectTimeout, 'Connection timed out', $deadlineNs);
         }
@@ -569,7 +811,7 @@ final class AsyncHttpClient
                 throw new ConnectionException('Invalid proxy CONNECT response');
             }
 
-            $status = (int) $matches[1];
+            $status = (int)$matches[1];
             if ($status < 200 || $status >= 300) {
                 throw new ConnectionException('Proxy CONNECT failed with status ' . $status);
             }
@@ -617,25 +859,25 @@ final class AsyncHttpClient
             throw new ConnectionException('Invalid proxy URL: ' . $proxy);
         }
 
-        $scheme = strtolower((string) ($parts['scheme'] ?? 'http'));
+        $scheme = strtolower((string)($parts['scheme'] ?? 'http'));
         if (!in_array($scheme, ['http', 'tcp'], true)) {
             throw new ConnectionException('Unsupported proxy scheme: ' . $scheme);
         }
 
         return [
-            'host' => (string) $parts['host'],
-            'port' => (int) ($parts['port'] ?? 8080),
+            'host' => (string)$parts['host'],
+            'port' => (int)($parts['port'] ?? 8080),
         ];
     }
 
     /**
      * @param resource $socket
      */
-    private function writePayload($socket, string $payload, RequestOptions $options): void
+    private function writePayload($socket, string $payload, RequestOptions $options, ?int $totalDeadlineNs = null): void
     {
         $offset = 0;
-        $deadlineNs = hrtime(true) + (int) ($options->totalTimeout * 1_000_000_000);
-        $writeDeadline = hrtime(true) + (int) ($options->writeTimeout * 1_000_000_000);
+        $deadlineNs = $totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
+        $writeDeadline = hrtime(true) + (int)($options->writeTimeout * 1_000_000_000);
         $payloadLength = strlen($payload);
 
         while ($offset < $payloadLength) {
@@ -659,7 +901,7 @@ final class AsyncHttpClient
             }
 
             $offset += $written;
-            $writeDeadline = hrtime(true) + (int) ($options->writeTimeout * 1_000_000_000);
+            $writeDeadline = hrtime(true) + (int)($options->writeTimeout * 1_000_000_000);
         }
     }
 
@@ -667,15 +909,15 @@ final class AsyncHttpClient
      * @param resource $socket
      * @return array{0: int, 1: Headers, 2: string}
      */
-    private function readResponse($socket, RequestOptions $options): array
+    private function readResponse($socket, RequestOptions $options, ?int $totalDeadlineNs = null): array
     {
         $headerBuffer = '';
         $body = '';
         $headers = null;
         $contentLength = null;
         $chunked = false;
-        $deadlineNs = hrtime(true) + (int) ($options->totalTimeout * 1_000_000_000);
-        $readDeadline = hrtime(true) + (int) ($options->readTimeout * 1_000_000_000);
+        $deadlineNs = $totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
+        $readDeadline = hrtime(true) + (int)($options->readTimeout * 1_000_000_000);
 
         while (true) {
             $this->ensureTotalTimeout($deadlineNs);
@@ -700,7 +942,7 @@ final class AsyncHttpClient
                 continue;
             }
 
-            $readDeadline = hrtime(true) + (int) ($options->readTimeout * 1_000_000_000);
+            $readDeadline = hrtime(true) + (int)($options->readTimeout * 1_000_000_000);
 
             if ($headers === null) {
                 $headerBuffer .= $chunk;
@@ -714,8 +956,8 @@ final class AsyncHttpClient
                 $headerBuffer = $rawHeaders;
                 $headers = Headers::fromRaw($rawHeaders);
                 $contentLengthHeader = $headers->get('Content-Length');
-                $contentLength = $contentLengthHeader !== null ? max(0, (int) $contentLengthHeader) : null;
-                $chunked = str_contains(strtolower((string) $headers->get('Transfer-Encoding', '')), 'chunked');
+                $contentLength = $contentLengthHeader !== null ? max(0, (int)$contentLengthHeader) : null;
+                $chunked = str_contains(strtolower((string)$headers->get('Transfer-Encoding', '')), 'chunked');
             } else {
                 $body .= $chunk;
             }
@@ -749,15 +991,77 @@ final class AsyncHttpClient
             $body = $this->decodeChunkedBody($body);
         }
 
-        return [(int) $matches[1], $headers, $body];
+        return [(int)$matches[1], $headers, $body];
     }
 
     /**
      * @param resource $socket
      */
+    private function readResponseHead($socket, RequestOptions $options, ?int $totalDeadlineNs = null): array
+    {
+        $headerBuffer = '';
+        $bodyBuffer = '';
+        $headers = null;
+        $contentLength = null;
+        $chunked = false;
+        $deadlineNs = $totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
+        $readDeadline = hrtime(true) + (int)($options->readTimeout * 1_000_000_000);
+
+        while (true) {
+            $this->ensureTotalTimeout($deadlineNs);
+            if (hrtime(true) >= $readDeadline) {
+                throw new TimeoutException('Read timed out');
+            }
+
+            $remainingReadSeconds = max(0.0, ($readDeadline - hrtime(true)) / 1_000_000_000);
+            $this->waitForSocket($socket, true, false, $remainingReadSeconds, 'Read timed out', $deadlineNs);
+            $chunk = @fread($socket, 65536);
+
+            if ($chunk === false) {
+                throw new ConnectionException('Failed to read response');
+            }
+
+            if ($chunk === '') {
+                if (feof($socket)) {
+                    break;
+                }
+
+                $this->loop->next();
+                continue;
+            }
+
+            $readDeadline = hrtime(true) + (int)($options->readTimeout * 1_000_000_000);
+            $headerBuffer .= $chunk;
+            $position = strpos($headerBuffer, "\r\n\r\n");
+            if ($position === false) {
+                continue;
+            }
+
+            $rawHeaders = substr($headerBuffer, 0, $position);
+            $bodyBuffer = substr($headerBuffer, $position + 4);
+            $headerBuffer = $rawHeaders;
+            $headers = Headers::fromRaw($rawHeaders);
+            $contentLengthHeader = $headers->get('Content-Length');
+            $contentLength = $contentLengthHeader !== null ? max(0, (int)$contentLengthHeader) : null;
+            $chunked = str_contains(strtolower((string)$headers->get('Transfer-Encoding', '')), 'chunked');
+            break;
+        }
+
+        if ($headers === null) {
+            throw new ConnectionException('Invalid HTTP response: headers not found');
+        }
+
+        $statusLine = strtok($headerBuffer, "\r\n") ?: '';
+        if (preg_match('/HTTP\/\d\.\d\s+(\d{3})/', $statusLine, $matches) !== 1) {
+            throw new ConnectionException('Invalid HTTP response status line');
+        }
+
+        return [(int)$matches[1], $headers, $bodyBuffer, $contentLength, $chunked];
+    }
+
     private function waitForSocket($socket, bool $read, bool $write, float $timeoutSeconds, string $message, int $totalDeadlineNs): void
     {
-        $deadlineNs = hrtime(true) + (int) ($timeoutSeconds * 1_000_000_000);
+        $deadlineNs = hrtime(true) + (int)($timeoutSeconds * 1_000_000_000);
 
         while (true) {
             $this->ensureTotalTimeout($totalDeadlineNs);
@@ -826,7 +1130,7 @@ final class AsyncHttpClient
     {
         $cookies = [];
         foreach ($headers->values('Set-Cookie') as $line) {
-            $pair = trim((string) strtok($line, ';'));
+            $pair = trim((string)strtok($line, ';'));
             if (!str_contains($pair, '=')) {
                 continue;
             }
