@@ -15,6 +15,7 @@ Esta biblioteca fornece:
 - Concorrência com `awaitAll()`, `awaitAny()`, `race()`, `awaitSettled()`, `parallel()` e `concurrent()`
 - Proxy HTTP e túnel HTTPS via CONNECT
 - Reuso básico de conexões com pool por origem, habilitado explicitamente com `withKeepAlive(true)`
+- Transição de rede injetável (`TransportInterface`) e mock pronto (`MockTransport`) para testes sem rede
 
 ## Requisitos
 
@@ -62,6 +63,8 @@ O pacote trabalha com estes blocos:
 - `CookieJar`: armazenamento e envio automático de cookies
 - `MultipartBuilder`: construção de multipart/form-data
 - `ConcurrentExecutor`: primitivas de concorrência
+- `TransportInterface` + `SocketTransport`: fronteira de rede injetável (sockets TCP/TLS, proxy, redirects)
+- `Testing\MockTransport`: transporte de teste para consumidores, sem rede
 - `ConnectionPool`: reuso de sockets por origem
 - `HttpException`, `TimeoutException`, `ConnectionException`: falhas do domínio
 
@@ -110,6 +113,7 @@ print_r($upload->json());
 
 ```php
 get(string $url, array $query = [], array $headers = []): Future
+head(string $url, array $query = [], array $headers = []): Future
 post(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
 put(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
 patch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
@@ -121,10 +125,14 @@ streamPut(string $url, mixed $body = null, array $headers = [], array $files = [
 streamPatch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
 streamDelete(string $url, array $query = [], array $headers = []): Future
 streamRequest(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null): Future
-streamSseGet(string $url, array $query = [], array $headers = [], bool $requireDone = true): Future
-streamSsePost(string $url, array $query = [], array $headers = [], bool $requireDone = true): Future
-streamSseRequest(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null, bool $requireDone = true): Future
+streamSseGet(string $url, array $query = [], array $headers = [], bool $requireDone = false, ?callable $completionDetector = null): Future
+streamSsePost(string $url, mixed $body = null, array $headers = [], bool $requireDone = false, ?callable $completionDetector = null): Future
+streamSseRequest(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null, bool $requireDone = false, ?callable $completionDetector = null): Future
 ```
+
+> Requisições `HEAD` e respostas `204`, `205` e `304` nunca carregam corpo: o
+> cliente retorna imediatamente com `body()` vazio (e stream completo), mesmo
+> que o servidor envie `Content-Length` ou `Transfer-Encoding` descritivos.
 
 ### Concorrência
 
@@ -147,6 +155,7 @@ withCookies(array $cookies, string $domain = '', string $path = '/')
 withProxy(string $proxy)
 withUserAgent(string $userAgent)
 withJson(bool $enabled = true)
+withCompression(bool $enabled = true)
 withBearerToken(string $token)
 withBasicAuth(string $username, string $password)
 withRetries(int $retries)
@@ -227,14 +236,12 @@ try {
 }
 ```
 
-Em muitos streams compatíveis com chat ou IA, a mensagem final vem como
-`data: [DONE]`. Esse marcador fecha o ciclo de forma limpa e evita que você
-consuma o stream até o final sem precisar.
-
-Se o stream terminar sem esse marcador e você usar o modo padrão, a biblioteca
-lança uma exceção para avisar que a resposta terminou cedo demais. Se a carga
-útil vier como JSON inválido, o erro mostra um trecho do payload para ajudar no
-debug.
+Alguns serviços de chat ou IA encerram a resposta com `data: [DONE]`. Para
+reconhecer esse marcador e exigir que ele apareça antes do fim, passe
+`requireDone: true` e `AsyncHttpClient::doneMarkerCompletionDetector()`. Por
+padrão, `requireDone` é `false` e o fim normal do stream não lança erro. Se um
+evento convertido com `json()` contiver JSON inválido, a exceção inclui um
+pequeno trecho do conteúdo para ajudar no diagnóstico.
 
 Resumo mental:
 
@@ -330,6 +337,11 @@ $response = await($client->get('https://httpbin.org/cookies'));
 print_r($response->json());
 ```
 
+O envio de cookies respeita o domínio em boundary de ponto (cookie de `evil.com`
+não vai para `notevil.com`), o caminho, a expiração e a flag `Secure`. Cookies
+recebidos sem `Domain` ficam limitados ao host de origem. O atributo `Domain`
+precisa corresponder ao host de origem ou ser um domínio pai válido.
+
 ### 7. Bearer token
 
 ```php
@@ -369,6 +381,10 @@ $response = await($client->post(
 
 echo $response->status() . PHP_EOL;
 ```
+
+Uploads multipart são construídos por partes em um buffer `php://temp`
+(memória até 2MB, resto em disco) e enviados por segmentos direto no socket —
+arquivos grandes não são materializados em memória pelo cliente.
 
 ### 10. Upload com `files`
 
@@ -425,6 +441,11 @@ $firstValue = race([
 
 echo $firstValue->status() . PHP_EOL;
 ```
+
+O vencedor é sempre o primeiro futuro a assentar de fato — nunca o primeiro da
+lista —, mesmo que os demais levem mais tempo. Se o primeiro a assentar tiver
+rejeitado, a exceção é propagada (use `settled()` para coletar todos os
+resultados sem lançar).
 
 ### 13. `awaitSettled()`
 
@@ -488,9 +509,9 @@ $response = await($client->get('https://jsonplaceholder.typicode.com/todos/1'));
 ```
 
 `withRetries(3)` permite até três novas tentativas depois da chamada inicial,
-totalizando no máximo quatro chamadas. Falhas de conexão, timeouts e respostas
-5xx também podem repetir métodos não idempotentes, como `POST`; habilite retries
-nesses casos somente quando a operação puder ser executada novamente com segurança.
+totalizando no máximo quatro chamadas. O cliente só repete GET, HEAD, OPTIONS,
+PUT e DELETE após falhas de conexão, timeout ou respostas 5xx. POST e PATCH não
+são repetidos automaticamente.
 
 ### 17. Retry e backoff exponencial
 
@@ -514,6 +535,10 @@ $response = await($client->get('http://httpbin.org/redirect/1'));
 echo $response->status() . PHP_EOL;
 echo $response->redirected() ? 'teve redirect' : 'sem redirect';
 ```
+
+Ao seguir redirect para outra origem (scheme, host ou porta diferentes), o
+cliente remove `Authorization`, `Cookie` e as credenciais bearer/basic
+configuradas — credenciais nunca viajam para outro domínio.
 
 ### 19. Salvar resposta em arquivo
 
@@ -570,113 +595,286 @@ $response = await($client->get('https://example.com'));
 > `withVerifySSL(false)` desativa a validação do certificado e do hostname e
 > deve ser restrito a ambientes locais controlados.
 
-## Referência rápida por classe
+### 24. Compressão gzip
+
+```php
+$client = (new AsyncHttpClient())
+    ->withCompression(); // envia Accept-Encoding: gzip
+
+$response = await($client->get('https://httpbin.org/gzip'));
+
+print_r($response->json()); // corpo já decodificado
+```
+
+Respostas com `Content-Encoding: gzip` são decodificadas automaticamente no
+caminho materializado (`Response`), mesmo sem `withCompression()` — a opção
+controla apenas a negociação via `Accept-Encoding`. Codificações não suportadas
+lançam `ConnectionException`. O caminho de streaming (`streamGet()` etc.)
+entrega os bytes como chegam, sem decodificação de `Content-Encoding`.
+
+### 25. Testes sem rede com `MockTransport`
+
+O transporte de rede é injetável via `TransportInterface`. Para testar código
+consumidor sem rede, use o mock pronto da biblioteca:
+
+```php
+use Omegaalfa\HttpClient\Http\AsyncHttpClient;
+use Omegaalfa\HttpClient\Http\Headers;
+use Omegaalfa\HttpClient\Http\Response;
+use Omegaalfa\HttpClient\Http\Testing\MockTransport;
+use function Omegaalfa\HttpClient\Http\await;
+
+$transport = new MockTransport([
+    // Fila de respostas: Response, StreamResponse, Throwable ou callable.
+    new Response(200, new Headers(['Content-Type' => 'application/json']), '{"ok":true}'),
+]);
+
+$client = new AsyncHttpClient(transport: $transport);
+
+// O código sob teste usa o cliente normalmente — sem rede.
+$response = await($client->get('https://api.example.com/status'));
+assert($response->json() === ['ok' => true]);
+
+// As requisições recebidas ficam registradas para asserções.
+assert($transport->lastRequest()?->method === 'GET');
+```
+
+Para rotas de streaming, monte a resposta com `MockTransport::stream()`:
+
+```php
+$transport = new MockTransport([
+    MockTransport::stream('dados em chunks', 200, ['Content-Type' => 'text/plain']),
+]);
+
+$stream = await((new AsyncHttpClient(transport: $transport))->streamGet('https://api.example.com/s'));
+assert($stream->consume() === 'dados em chunks');
+```
+
+Também é possível injetar sua própria implementação de `TransportInterface`
+(ex.: gravando em sistema de arquivos, ou fakes específicos de domínio).
+
+## Referência da API
+
+Os exemplos usam `await()` para obter o resultado de um `Future`. Isso executa o
+event loop até a operação terminar. Você pode iniciar várias requisições antes
+de aguardar seus resultados para que elas avancem em conjunto.
 
 ### AsyncHttpClient
 
-#### Requisições
+Normalmente, crie o cliente sem argumentos: `new AsyncHttpClient()`. O
+construtor também aceita `loop`, `options`, `connectionPool` e `transport` para
+integrar um event loop, opções, pool ou transporte próprios. Na maioria dos
+aplicativos, as opções fluentes são suficientes; `transport` é útil para testes
+e integrações especiais.
 
-- `get()`
-- `post()`
-- `put()`
-- `patch()`
-- `delete()`
-- `request()`
+#### Requisições com resposta completa
+
+Todos os métodos abaixo devolvem `Future<Response>`. `Response` contém o corpo
+completo em memória. Status como 404 e 500 são devolvidos normalmente; eles não
+lançam exceções automaticamente.
+
+- `get($url, $query = [], $headers = [])`: envia GET; `$query` acrescenta
+  parâmetros à URL.
+- `head($url, $query = [], $headers = [])`: envia HEAD; a resposta não tem corpo.
+- `post($url, $body = null, $headers = [], $files = [], $multipart = null)`: envia
+  dados para criar um recurso. Use `$files` ou `MultipartBuilder` para arquivos.
+- `put(...)`: envia ou substitui um recurso; aceita os argumentos de `post()`.
+- `patch(...)`: envia alterações parciais; aceita os argumentos de `post()`.
+- `delete($url, $query = [], $headers = [])`: solicita a remoção de um recurso.
+- `request($method, $url, $query = [], $headers = [], $body = null, $files = [], $multipart = null)`:
+  método genérico para qualquer verbo HTTP, inclusive OPTIONS.
+
+Corpos em array são JSON por padrão. Para enviar um formulário URL encoded,
+defina `Content-Type: application/x-www-form-urlencoded`.
+
+#### Respostas em streaming
+
+`streamGet`, `streamPost`, `streamPut`, `streamPatch`, `streamDelete` e
+`streamRequest` aceitam os mesmos tipos de argumentos dos métodos completos
+correspondentes, mas devolvem `Future<StreamResponse>`. Use `readChunk()` para
+receber partes do corpo ou `consume()` para juntá-las em uma string. Feche a
+resposta se parar de ler antes do fim. `consume()` guarda o corpo todo em memória;
+streaming não descomprime automaticamente `Content-Encoding: gzip`.
+
+- `streamGet($url, $query = [], $headers = [])`: GET lido aos poucos.
+- `streamPost($url, $body = null, $headers = [], $files = [], $multipart = null)`:
+  POST com resposta lida aos poucos.
+- `streamPut(...)` e `streamPatch(...)`: versões em streaming de PUT e PATCH.
+- `streamDelete($url, $query = [], $headers = [])`: versão em streaming de DELETE.
+- `streamRequest($method, $url, $query = [], $headers = [], $body = null, $files = [], $multipart = null)`:
+  versão genérica em streaming.
+
+#### Server-Sent Events (SSE)
+
+- `streamSseGet($url, $query = [], $headers = [], $requireDone = false, $completionDetector = null)`:
+  abre um fluxo SSE via GET.
+- `streamSsePost($url, $body = null, $headers = [], $requireDone = false, $completionDetector = null)`:
+  abre um fluxo SSE via POST.
+- `streamSseRequest($method, $url, $query = [], $headers = [], $body = null, $files = [], $multipart = null, $requireDone = false, $completionDetector = null)`:
+  versão genérica para SSE.
+- `doneMarkerCompletionDetector($marker = '[DONE]')`: cria um detector para
+  reconhecer um evento cuja mensagem seja igual ao marcador.
+
+Por padrão, o fim do stream é aceito sem um evento especial. Para exigir um
+marcador, use `requireDone: true` e forneça um `completionDetector`. Leia os
+eventos com `nextEvent()` ou com `foreach`. Cada `SseEvent` oferece `data()`,
+`event()`, `id()`, `retry()`, `done()` e `json()`. Feche o stream se sair antes
+do fim.
+
+```php
+$sse = await($client->streamSseGet(
+    'https://example.com/events',
+    requireDone: true,
+    completionDetector: AsyncHttpClient::doneMarkerCompletionDetector(),
+));
+
+try {
+    foreach ($sse as $event) {
+        echo $event->data() . PHP_EOL;
+        if ($event->done()) {
+            break;
+        }
+    }
+} finally {
+    $sse->close();
+}
+```
 
 #### Concorrência
 
-- `concurrent()`
-- `parallel()`
-- `awaitAny()`
-- `race()`
-- `settled()`
+- `concurrent($tasks)`: agenda callbacks identificados por chave e devolve os
+  resultados com as mesmas chaves.
+- `parallel($futures)`: aguarda todos os `Future` fornecidos e preserva as chaves.
+- `awaitAny($futures)`: devolve `['key' => ..., 'value' => ...]` do primeiro
+  futuro concluído. Os outros futuros não são cancelados automaticamente.
+- `race($futures)`: como `awaitAny()`, mas devolve somente o valor vencedor.
+- `settled($futures)`: aguarda todos e devolve, por chave, `state` como
+  `fulfilled` ou `rejected`, além de `value` ou `reason`.
 
-#### Configuração
+Os helpers `awaitAll()`, `awaitAny()`, `awaitSettled()` e `race()` fazem essas
+operações sem chamar os métodos de concorrência do cliente.
 
-- `withBaseUrl()`
-- `withHeader()`
-- `withHeaders()`
-- `withCookie()`
-- `withCookies()`
-- `withProxy()`
-- `withUserAgent()`
-- `withJson()`
-- `withBearerToken()`
-- `withBasicAuth()`
-- `withRetries()`
-- `withRetryDelay()`
-- `withExponentialBackoff()`
-- `withFollowRedirects()`
-- `withVerifySSL()`
-- `withKeepAlive()`
-- `withTimeout()`
-- `connectTimeout()`
-- `readTimeout()`
-- `writeTimeout()`
-- `totalTimeout()`
+#### Configuração fluente
+
+Cada método devolve um novo `AsyncHttpClient`, permitindo encadear opções sem
+alterar a configuração do objeto original. Tempos são informados em segundos;
+delay de retry é informado em milissegundos.
+
+- `withBaseUrl($url)`: prefixo para URLs relativas.
+- `withHeader($name, $value)` / `withHeaders($headers)`: headers padrão; headers
+  da chamada podem substituir os padrões com o mesmo nome.
+- `withCookie($name, $value, $domain = '', $path = '/')` /
+  `withCookies($cookies, $domain = '', $path = '/')`: cookies manuais. Sem domínio,
+  o cookie fica associado ao primeiro host que usar esse cliente.
+- `withProxy($proxy)`: endereço de proxy HTTP; HTTPS usa túnel CONNECT.
+- `withUserAgent($value)`: define `User-Agent`.
+- `withJson($enabled = true)`: controla os headers JSON automáticos. Arrays de
+  corpo ainda viram JSON por padrão, exceto para URL encoded.
+- `withCompression($enabled = true)`: anuncia suporte a gzip. Respostas completas
+  gzip são descomprimidas; streaming entrega os bytes codificados.
+- `withBearerToken($token)` / `withBasicAuth($user, $password)`: configura
+  autenticação `Authorization`.
+- `withRetries($count)`: número de tentativas adicionais. Só repete GET, HEAD,
+  OPTIONS, PUT e DELETE em falhas de conexão, timeout ou resposta 5xx.
+- `withRetryDelay($milliseconds)`: espera inicial entre tentativas.
+- `withExponentialBackoff($enabled = true)`: dobra a espera a cada tentativa.
+- `withFollowRedirects($countOrEnabled)`: limite de redirecionamentos; `false`
+  desativa, `true` usa o padrão 3 e um inteiro define o limite.
+- `withVerifySSL($verify)`: controla validação do certificado e do nome do
+  servidor; mantenha ativo em produção.
+- `withKeepAlive($enabled = true)`: permite reutilizar conexões ociosas.
+- `withTimeout($seconds)`: atalho para configurar o tempo total.
+- `connectTimeout($seconds)`, `readTimeout($seconds)`, `writeTimeout($seconds)`:
+  limites de conexão, leitura e escrita.
+- `totalTimeout($seconds)`: limite de tempo total usado pelo transporte.
+
+Valores padrão: sem retries; espera de 100 ms entre tentativas; backoff
+exponencial desligado; até 3 redirecionamentos; validação TLS ligada; keep-alive
+e compressão desligados; timeout de conexão de 10 s, leitura de 30 s, escrita
+de 30 s e total de 60 s.
 
 ### Response
 
-- `status()`
-- `headers()`
-- `body()`
-- `text()`
-- `json()`
-- `successful()`
-- `failed()`
-- `redirected()`
-- `cookies()`
-- `save()`
+- `status()`: código HTTP, por exemplo 200 ou 404.
+- `headers()`: cópia dos headers da resposta.
+- `body()` / `text()`: corpo completo como string.
+- `json($assoc = true)`: decodifica JSON; com `true`, objetos viram arrays.
+  JSON inválido lança `JsonException`.
+- `successful()` / `failed()`: informa se o status está ou não entre 200 e 299.
+- `redirected()`: informa se a resposta veio após um redirecionamento.
+- `cookies()`: cookies extraídos dos headers.
+- `save($path)`: grava o corpo no arquivo indicado; falhas lançam `RuntimeException`.
+
+### StreamResponse e SseStream
+
+`StreamResponse` oferece `status()`, `headers()`, `redirected()`, `cookies()`,
+`isComplete()`, `readChunk($length = 65536)`, `consume()`, `close()` e `socket()`.
+`readChunk()` devolve uma string ou `null` no fim; `$length` precisa ser maior
+que zero. A conexão só pode ser reutilizada se a resposta for lida até o fim.
+
+`SseStream` oferece `nextEvent()`, `close()`, `stream()` e iteração com `foreach`.
+`SseEvent` oferece `data()`, `event()`, `id()`, `retry()`, `done()` e `json()`.
+`done()` só será verdadeiro quando o detector configurado reconhecer um evento
+de conclusão.
 
 ### Headers
 
-- `set()`
-- `add()`
-- `has()`
-- `get()`
-- `values()`
-- `remove()`
-- `merge()`
-- `toArray()`
-- `toLines()`
-- `from()`
-- `fromRaw()`
+Coleção case-insensitive: nomes não diferenciam maiúsculas de minúsculas e um
+header pode ter vários valores. CR, LF e NUL são rejeitados para evitar injeção.
 
-### CookieJar
-
-- `set()`
-- `setMany()`
-- `storeFromHeaders()`
-- `headerFor()`
-- `all()`
+- `new Headers($headers)` / `Headers::from($headers)`: cria uma coleção.
+- `set($name, $value)`: substitui os valores do header.
+- `add($name, $value)`: acrescenta um valor.
+- `has($name)`, `get($name, $default = null)`, `values($name)`: consulta presença,
+  valores combinados ou valores individuais.
+- `remove($name)`: apaga um header.
+- `merge($headers)`: devolve uma cópia com os headers informados aplicados.
+- `toArray()`, `toLines()`: converte para array ou linhas HTTP.
+- `fromRaw($text)`: interpreta um bloco de headers recebido da rede.
 
 ### MultipartBuilder
 
-- `make()`
-- `field()`
-- `file()`
-- `build()`
+- `MultipartBuilder::make()`: inicia um formulário multipart.
+- `field($name, $value)`: adiciona um campo simples.
+- `file($name, $path, $filename = null, $contentType = null)`: adiciona um arquivo.
+- `build()`: monta todo o conteúdo em memória.
+- `buildToStream()`: prepara stream temporário, tipo de conteúdo e tamanho para
+  o transporte enviar por partes.
 
-### ConcurrentExecutor
+### Transporte e testes
 
-- `all()`
-- `named()`
-- `any()`
-- `race()`
-- `settled()`
+`TransportInterface` define `send()` e `sendStream()`. Injete uma implementação
+no construtor de `AsyncHttpClient` para substituir a rede. `SocketTransport` é o
+transporte padrão.
 
-### ConnectionPool
+`Request` representa uma chamada já preparada e expõe `method`, `url`, `headers`,
+`body`, `query`, `files`, `multipart` e `options`. `withUrl($url)` cria uma nova
+requisição com outra URL; esses tipos são mais úteis ao implementar um transporte
+ou inspecionar chamadas em testes do que no uso normal do cliente.
 
-- `acquire()`
-- `release()`
+`Testing\\MockTransport` permite testar sem rede. Seu construtor recebe uma fila
+de `Response`, `StreamResponse`, `Throwable` ou callbacks com `Request` e
+`RequestOptions`. `push($result)` acrescenta um resultado. `requests()`,
+`lastRequest()` e `pendingCount()` ajudam a inspecionar as chamadas.
+`MockTransport::stream($body, $status = 200, $headers = [])` cria uma resposta
+de streaming para testes.
 
-### Funções auxiliares
+`ConnectionPool` gerencia conexões ociosas. `acquire()` retira uma conexão
+reutilizável e `release($socket, $keepAlive = false)` devolve ou fecha o socket;
+normalmente o cliente faz isso automaticamente.
 
-- `await()`
-- `awaitAll()`
-- `awaitAny()`
-- `race()`
-- `awaitSettled()`
+### Cookies e erros
+
+`CookieJar` oferece `set()` e `setMany()` para guardar cookies, `headerFor()`
+para obter os cookies que combinam com host, caminho e HTTPS, `storeFromHeaders()`
+para guardar os cookies de uma resposta e `all()` para inspecionar o conteúdo.
+Na maioria dos casos, use `withCookie()` ou `withCookies()` no cliente.
+
+`HttpException` fornece `request()` e `response()` quando esses objetos estão
+disponíveis. `ConnectionException` representa falhas de conexão ou protocolo;
+`TimeoutException` representa o vencimento de um limite de tempo. Erros HTTP
+4xx e 5xx continuam sendo respostas normais, a menos que uma política de retry
+esteja avaliando uma resposta 5xx.
 
 ## Tratamento de erros
 
@@ -704,19 +902,19 @@ try {
 
 - Body em array vira JSON por padrão, mesmo com `withJson(false)`; essa opção controla a inclusão automática dos headers JSON.
 - Para enviar `application/x-www-form-urlencoded`, defina o header explicitamente.
-- Cookies recebidos por `Set-Cookie` são persistidos no `CookieJar` e filtrados por domínio, path, expiração e flag `Secure`.
-- Redirects 301, 302 e 303 podem converter o método para GET, seguindo o comportamento implementado.
+- Cookies recebidos por `Set-Cookie` são persistidos no `CookieJar` e filtrados por domínio (com boundary de ponto), path, expiração e flag `Secure`; o atributo `Domain` precisa ser parent do host de origem.
+- Redirects 301, 302 e 303 podem converter o método para GET; ao mudar de origem, credenciais são removidas.
 - `withRetries(N)` configura até `N` novas tentativas além da chamada inicial.
-- Retries por timeout, falha de conexão ou resposta 5xx podem repetir inclusive métodos não idempotentes.
+- Retries por timeout, falha de conexão ou resposta 5xx ocorrem apenas para métodos idempotentes: GET, HEAD, OPTIONS, PUT e DELETE. POST e PATCH não são repetidos automaticamente.
 - `withProxy()` suporta HTTP direto e CONNECT para HTTPS.
 - O keep-alive é desabilitado por padrão; use `withKeepAlive(true)` para habilitar o pool.
+- Conexões recusadas/inacessíveis são reportadas como `Connection failed: ...`, não como falha de escrita.
 
 ## Limitações atuais
 
 - O pool é básico e ainda não possui TTL, health-check ativo ou métricas por origem.
-- O `CookieJar` usa correspondência simples por sufixo de domínio e ainda não distingue cookies host-only.
-- Retries não implementam uma política automática de segurança/idempotência por método.
-- Ainda não há streaming de upload zero-copy para payloads grandes.
+- O `CookieJar` distingue cookies host-only e cookies com atributo `Domain`, mas não valida public suffixes. Cookies manuais sem domínio ficam associados ao primeiro host que os utiliza.
+- O corpo puro em stream (arquivo sem multipart) não é suportado; uploads multipart usam buffer com spill em disco.
 - Não há HTTP/2, HTTP/3 ou WebSocket nativos ainda.
 
 ## Testes
@@ -724,6 +922,9 @@ try {
 ```bash
 composer test
 ```
+
+Para testar código consumidor sem rede, injete `Testing\MockTransport` no
+`AsyncHttpClient` (ver seção 25).
 
 Outros scripts:
 
@@ -733,6 +934,26 @@ composer test-verbose
 composer test-filter -- NomeDoTeste
 composer test-stop-on-failure
 ```
+
+## Qualidade (mutation testing)
+
+```bash
+composer quality:mutation
+```
+
+Executa o [Infection](https://infection.github.io/): gera mutantes do código em
+`src/`, roda para cada um apenas os testes que o cobrem e **falha se o MSI**
+(Mutation Score Indicator) ficar abaixo de `60%` (`--min-msi=60`). É o quality
+gate da suíte — testes que não matam mutantes aparecem no relatório para
+reforço.
+
+- Configuração: `infection.json5` (fontes, mutadores padrão, timeout de 10s)
+- Relatório: `build/infection.log` (com breakdown por mutador)
+- Requer driver de cobertura (`pcov` ou `xdebug`)
+
+O CI (`.github/workflows/ci.yaml`) roda o mesmo gate (`composer quality:mutation`)
+em cada push/PR para `main`, publicando o relatório do Infection como artefato
+da execução.
 
 ## Licença
 

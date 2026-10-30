@@ -5,20 +5,24 @@ declare(strict_types=1);
 namespace Tests\Omegaalfa\HttpClient\Http;
 
 use Omegaalfa\HttpClient\Http\AsyncHttpClient;
+use Tests\Omegaalfa\HttpClient\Support\LocalConnectProxyServer;
+use Tests\Omegaalfa\HttpClient\Support\LocalHttpsServer;
+use Tests\Omegaalfa\HttpClient\Support\SelfSignedCertificate;
 use PHPUnit\Framework\TestCase;
+
 use function Omegaalfa\HttpClient\Http\await;
 
 final class HttpsProxyIntegrationTest extends TestCase
 {
-    private static $certificate;
-    private static $httpsServer;
-    private static $proxyServer;
+    private static SelfSignedCertificate $certificate;
+    private static LocalHttpsServer $httpsServer;
+    private static LocalConnectProxyServer $proxyServer;
 
     public static function setUpBeforeClass(): void
     {
-        self::$certificate = new \Tests\Omegaalfa\HttpClient\Support\SelfSignedCertificate('127.0.0.1');
-        self::$httpsServer = new \Tests\Omegaalfa\HttpClient\Support\LocalHttpsServer(self::$certificate->combinedPem());
-        self::$proxyServer = new \Tests\Omegaalfa\HttpClient\Support\LocalConnectProxyServer('127.0.0.1', self::$httpsServer->port());
+        self::$certificate = new SelfSignedCertificate('127.0.0.1');
+        self::$httpsServer = new LocalHttpsServer(self::$certificate->combinedPem());
+        self::$proxyServer = new LocalConnectProxyServer('127.0.0.1', self::$httpsServer->port());
     }
 
     public static function tearDownAfterClass(): void

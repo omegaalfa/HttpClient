@@ -11,8 +11,6 @@ use RuntimeException;
 
 final class StreamResponse
 {
-    private string $buffer;
-
     private bool $closed = false;
 
     private bool $completed = false;
@@ -23,13 +21,9 @@ final class StreamResponse
 
     private int $bytesRead = 0;
 
-    private string $rawBuffer = '';
-
     private string $decodedBuffer = '';
 
-    private ?int $pendingChunkLength = null;
-
-    private bool $waitingForFinalChunkCrlf = false;
+    private ChunkedDecoder $chunkedDecoder;
 
     private int $totalDeadlineNs;
 
@@ -53,14 +47,14 @@ final class StreamResponse
         ?int $contentLength = null,
         ?int $totalDeadlineNs = null
     ) {
-        $this->buffer = $initialBody;
-        $this->rawBuffer = $initialBody;
         $this->chunked = $chunked;
         $this->contentLength = $contentLength;
+        $this->chunkedDecoder = new ChunkedDecoder();
 
-        if (!$this->chunked) {
+        if ($this->chunked) {
+            $this->chunkedDecoder->push($initialBody);
+        } else {
             $this->decodedBuffer = $initialBody;
-            $this->rawBuffer = '';
         }
 
         $this->totalDeadlineNs = $totalDeadlineNs
@@ -199,6 +193,8 @@ final class StreamResponse
             $length = min($length, $remaining);
         }
 
+        $length = max(1, $length);
+
         $this->waitForReadable();
         $chunk = @fread($this->socket, $length);
 
@@ -226,73 +222,15 @@ final class StreamResponse
 
     private function pumpChunkedBuffer(): void
     {
-        while (true) {
-            if ($this->waitingForFinalChunkCrlf) {
-                if (strlen($this->rawBuffer) < 2) {
-                    break;
-                }
-
-                if (substr($this->rawBuffer, 0, 2) !== "\r\n") {
-                    throw new ConnectionException('Invalid chunked response terminator');
-                }
-
-                $this->rawBuffer = substr($this->rawBuffer, 2);
-                $this->waitingForFinalChunkCrlf = false;
-                $this->completed = true;
-                $this->close();
-                break;
-            }
-
-            if ($this->pendingChunkLength === null) {
-                $lineEnd = strpos($this->rawBuffer, "\r\n");
-                if ($lineEnd === false) {
-                    break;
-                }
-
-                $line = substr($this->rawBuffer, 0, $lineEnd);
-                $this->rawBuffer = substr($this->rawBuffer, $lineEnd + 2);
-                $line = trim(explode(';', $line, 2)[0]);
-
-                if ($line === '' || preg_match('/^[0-9a-fA-F]+$/', $line) !== 1) {
-                    throw new ConnectionException('Invalid chunked response length');
-                }
-
-                $chunkLength = hexdec($line);
-
-                if ($chunkLength === 0) {
-                    $this->pendingChunkLength = 0;
-                    $this->waitingForFinalChunkCrlf = true;
-                    continue;
-                }
-
-                $this->pendingChunkLength = $chunkLength;
-            }
-
-            if ($this->pendingChunkLength === 0) {
-                continue;
-            }
-
-            if (strlen($this->rawBuffer) < $this->pendingChunkLength + 2) {
-                break;
-            }
-
-            $payload = substr($this->rawBuffer, 0, $this->pendingChunkLength);
-            $terminator = substr($this->rawBuffer, $this->pendingChunkLength, 2);
-
-            if ($terminator !== "\r\n") {
-                throw new ConnectionException('Invalid chunked response framing');
-            }
-
-            $this->rawBuffer = substr($this->rawBuffer, $this->pendingChunkLength + 2);
-            $this->pendingChunkLength = null;
-            $this->decodedBuffer .= $payload;
-
-            if ($this->decodedBuffer !== '') {
-                return;
-            }
+        $decoded = $this->chunkedDecoder->takeDecoded();
+        if ($decoded !== '') {
+            $this->decodedBuffer .= $decoded;
+            return;
         }
 
-        if ($this->completed) {
+        if ($this->chunkedDecoder->isCompleted()) {
+            $this->completed = true;
+            $this->close();
             return;
         }
 
@@ -305,41 +243,62 @@ final class StreamResponse
 
         if ($chunk === '') {
             if (feof($this->socket)) {
-                throw new ConnectionException('Incomplete chunked response body');
+                $this->chunkedDecoder->finish();
             }
 
             $this->loop->next();
             return;
         }
 
-        $this->rawBuffer .= $chunk;
-        $this->pumpChunkedBuffer();
+        $this->chunkedDecoder->push($chunk);
     }
 
     private function waitForReadable(): void
     {
         $deadlineNs = hrtime(true) + (int) ($this->options->readTimeout * 1_000_000_000);
+        $this->ensureTotalTimeout();
 
+        if (hrtime(true) >= $deadlineNs) {
+            throw new TimeoutException('Read timed out');
+        }
+
+        $read = [$this->socket];
+        $write = $except = [];
+        $ready = @stream_select($read, $write, $except, 0, 0);
+        if ($ready === false) {
+            throw new ConnectionException('stream_select failed while waiting for stream data');
+        }
+        if ($ready > 0) {
+            return;
+        }
+
+        if ($this->loop instanceof SocketReadinessInterface) {
+            $this->loop->awaitStream($this->socket, true, false, min($deadlineNs, $this->totalDeadlineNs));
+        } else {
+            $this->pollReadableFallback($deadlineNs);
+        }
+        $this->ensureTotalTimeout();
+        if (hrtime(true) >= $deadlineNs) {
+            throw new TimeoutException('Read timed out');
+        }
+    }
+
+    private function pollReadableFallback(int $deadlineNs): void
+    {
         while (true) {
             $this->ensureTotalTimeout();
-
             if (hrtime(true) >= $deadlineNs) {
                 throw new TimeoutException('Read timed out');
             }
-
             $read = [$this->socket];
-            $write = [];
-            $except = [];
+            $write = $except = [];
             $ready = @stream_select($read, $write, $except, 0, 0);
-
             if ($ready === false) {
                 throw new ConnectionException('stream_select failed while waiting for stream data');
             }
-
             if ($ready > 0) {
                 return;
             }
-
             $this->loop->next();
         }
     }

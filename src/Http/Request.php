@@ -6,6 +6,10 @@ namespace Omegaalfa\HttpClient\Http;
 
 final class Request
 {
+    /**
+     * @param array<string, mixed> $query
+     * @param array<string, string> $files
+     */
     public function __construct(
         public readonly string $method,
         public readonly string $url,

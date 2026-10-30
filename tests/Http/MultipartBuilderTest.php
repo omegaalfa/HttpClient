@@ -63,4 +63,109 @@ final class MultipartBuilderTest extends TestCase
             }
         }
     }
+
+    public function testBuildEscapesQuotesInFieldAndFileNames(): void
+    {
+        $tmpFile = tempnam(sys_get_temp_dir(), 'multipart-test-');
+        self::assertNotFalse($tmpFile);
+        file_put_contents($tmpFile, 'x');
+
+        try {
+            $multipart = MultipartBuilder::make()
+                ->field('evil"name', 'v')
+                ->file('doc"ument', $tmpFile, 'x"y.txt');
+
+            $built = $multipart->build();
+
+            self::assertStringContainsString('name="evil%22name"', $built['body']);
+            self::assertStringContainsString('name="doc%22ument"; filename="x%22y.txt"', $built['body']);
+            self::assertStringNotContainsString('name="evil"', $built['body']);
+        } finally {
+            if (is_file($tmpFile)) {
+                unlink($tmpFile);
+            }
+        }
+    }
+
+    public function testBuildNeutralizesControlCharsPreventingHeaderInjection(): void
+    {
+        $tmpFile = tempnam(sys_get_temp_dir(), 'multipart-test-');
+        self::assertNotFalse($tmpFile);
+        file_put_contents($tmpFile, 'x');
+
+        try {
+            $multipart = MultipartBuilder::make()
+                ->field("name\r\nX-Injected: pwned", 'v')
+                ->file('doc', $tmpFile, "f\r\nX-Injected: pwned.txt");
+
+            $built = $multipart->build();
+
+            self::assertStringContainsString('name="name%0D%0AX-Injected: pwned"', $built['body']);
+            self::assertStringContainsString('filename="f%0D%0AX-Injected: pwned.txt"', $built['body']);
+            self::assertStringNotContainsString("\r\nX-Injected: pwned\r\n", $built['body']);
+        } finally {
+            if (is_file($tmpFile)) {
+                unlink($tmpFile);
+            }
+        }
+    }
+
+    public function testBuildToStreamProducesValidMultipartBody(): void
+    {
+        $tmpFile = tempnam(sys_get_temp_dir(), 'multipart-test-');
+        self::assertNotFalse($tmpFile);
+        file_put_contents($tmpFile, 'streamed-content');
+
+        try {
+            $multipart = MultipartBuilder::make()
+                ->field('description', 'sample')
+                ->file('document', $tmpFile, 'doc.txt', 'text/plain');
+
+            $built = $multipart->buildToStream();
+            rewind($built['stream']);
+            $body = stream_get_contents($built['stream']);
+            fclose($built['stream']);
+            self::assertIsString($body);
+
+            self::assertStringContainsString('multipart/form-data; boundary=', $built['content_type']);
+            self::assertStringContainsString('name="description"', $body);
+            self::assertStringContainsString('name="document"; filename="doc.txt"', $body);
+            self::assertStringContainsString('Content-Type: text/plain', $body);
+            self::assertStringContainsString('streamed-content', $body);
+            self::assertSame(strlen($body), $built['content_length']);
+        } finally {
+            if (is_file($tmpFile)) {
+                unlink($tmpFile);
+            }
+        }
+    }
+
+    public function testBuildToStreamKeepsLargeUploadsOutOfMemory(): void
+    {
+        $tmpFile = tempnam(sys_get_temp_dir(), 'multipart-test-');
+        self::assertNotFalse($tmpFile);
+        file_put_contents($tmpFile, str_repeat('x', 5 * 1024 * 1024));
+
+        try {
+            $multipart = MultipartBuilder::make()->file('big', $tmpFile, 'big.bin');
+
+            $before = memory_get_usage(true);
+            $built = $multipart->buildToStream();
+            $after = memory_get_usage(true);
+
+            self::assertLessThan(
+                4 * 1024 * 1024,
+                $after - $before,
+                'Upload deve usar buffer com spill em disco, não materializar o arquivo em memória.'
+            );
+            self::assertSame($built['content_length'], (int)ftell($built['stream']));
+            self::assertGreaterThan(5 * 1024 * 1024, $built['content_length']);
+
+            fclose($built['stream']);
+        } finally {
+            if (is_file($tmpFile)) {
+                unlink($tmpFile);
+            }
+        }
+    }
 }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Omegaalfa\HttpClient\Http;
 
+use Fiber;
 use InvalidArgumentException;
 use Omegaalfa\FiberEventLoop\Future;
 use Throwable;
@@ -13,6 +14,10 @@ function await(Future $future): mixed
     return $future->await();
 }
 
+/**
+ * @param array<array-key, mixed> $futures
+ * @return array<array-key, mixed>
+ */
 function awaitAll(array $futures): array
 {
     if ($futures === []) {
@@ -34,6 +39,10 @@ function awaitAll(array $futures): array
 }
 
 /**
+ * Retorna o primeiro futuro a assentar (resolvido ou rejeitado). O vencedor é
+ * sempre o primeiro a assentar de fato — nunca o primeiro da lista —, mesmo que
+ * os demais levem mais tempo.
+ *
  * @param array<string|int, Future> $futures
  * @return array{key: string|int, value: mixed}
  */
@@ -56,32 +65,39 @@ function awaitAny(array $futures): array
     }
 
     $loop = $first->getLoop();
-    $ticks = 0;
 
-    while (true) {
-        foreach ($futures as $key => $future) {
-            if (!$future->isSettled()) {
-                continue;
+    $firstSettled = static function () use ($futures, $loop): array {
+        while (true) {
+            foreach ($futures as $key => $future) {
+                if (!$future->isSettled()) {
+                    continue;
+                }
+
+                return [
+                    'key' => $key,
+                    'value' => $future->await(),
+                ];
             }
 
-            return [
-                'key' => $key,
-                'value' => $future->await(),
-            ];
+            $loop->next();
         }
+    };
 
-        if (++$ticks >= 10_000) {
-            $firstKey = array_key_first($futures);
-            $firstFuture = $futures[$firstKey];
-
-            return [
-                'key' => $firstKey,
-                'value' => $firstFuture->await(),
-            ];
-        }
-
-        $loop->next();
+    if (Fiber::getCurrent() !== null) {
+        return $firstSettled();
     }
+
+    // Fora de fiber, next() não avança o loop: o polling roda dentro de um
+    // fiber próprio e o run() do await() externo é encerrado no vencedor.
+    $driver = $loop->async(static function () use ($firstSettled, $loop): array {
+        try {
+            return $firstSettled();
+        } finally {
+            $loop->stop();
+        }
+    });
+
+    return $driver->await();
 }
 
 /**
@@ -94,7 +110,7 @@ function race(array $futures): mixed
 
 /**
  * @param array<string|int, Future> $futures
- * @return array<string|int, array{state: 'fulfilled'|'rejected', value?: mixed, reason?: Throwable}>
+ * @return array<array-key, array{state: 'fulfilled', value: mixed}|array{state: 'rejected', reason: Throwable}>
  */
 function awaitSettled(array $futures): array
 {

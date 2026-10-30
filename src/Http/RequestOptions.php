@@ -6,6 +6,7 @@ namespace Omegaalfa\HttpClient\Http;
 
 final class RequestOptions
 {
+    /** @param array{0: string, 1: string}|null $basicAuth */
     public function __construct(
         public ?string $baseUrl = null,
         ?Headers $headers = null,
@@ -13,6 +14,7 @@ final class RequestOptions
         public ?string $proxy = null,
         public string $userAgent = 'FiberEventLoop AsyncHttpClient/1.0',
         public bool $sendJson = true,
+        public bool $compression = false,
         public ?string $bearerToken = null,
         public ?array $basicAuth = null,
         public int $retries = 0,
@@ -48,6 +50,7 @@ final class RequestOptions
         return $clone;
     }
 
+    /** @param array<string, string|list<string>> $headers */
     public function withHeaders(array $headers): self
     {
         $clone = clone $this;
@@ -63,6 +66,7 @@ final class RequestOptions
         return $clone;
     }
 
+    /** @param array<string|int, scalar|null> $cookies */
     public function withCookies(array $cookies, string $domain = '', string $path = '/'): self
     {
         $clone = clone $this;
@@ -94,6 +98,13 @@ final class RequestOptions
                 ->merge(['Accept' => 'application/json'])
                 ->merge(['Content-Type' => 'application/json']);
         }
+        return $clone;
+    }
+
+    public function withCompression(bool $enabled = true): self
+    {
+        $clone = clone $this;
+        $clone->compression = $enabled;
         return $clone;
     }
 

@@ -5,11 +5,14 @@ declare(strict_types=1);
 namespace Tests\Omegaalfa\HttpClient\Http;
 
 use Omegaalfa\HttpClient\Http\AsyncHttpClient;
+use Omegaalfa\HttpClient\Http\Exceptions\ConnectionException;
 use Omegaalfa\HttpClient\Http\Headers;
-use Omegaalfa\HttpClient\Http\Request;
-use Omegaalfa\HttpClient\Http\RequestOptions;
+use Omegaalfa\HttpClient\Http\Response;
+use Omegaalfa\HttpClient\Http\Testing\MockTransport;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
+
+use function Omegaalfa\HttpClient\Http\await;
 
 final class AsyncHttpClientInternalTest extends TestCase
 {
@@ -29,273 +32,98 @@ final class AsyncHttpClientInternalTest extends TestCase
         self::assertSame('https://api.example.com/v1/users', $resolved);
     }
 
-    public function testIsRedirectRecognizesSupportedStatusCodes(): void
+    public function testRetriesIdempotentRequestsOnServerErrors(): void
     {
-        $client = new AsyncHttpClient();
-
-        self::assertTrue($this->invokePrivate($client, 'isRedirect', 301));
-        self::assertTrue($this->invokePrivate($client, 'isRedirect', 308));
-        self::assertFalse($this->invokePrivate($client, 'isRedirect', 200));
-        self::assertFalse($this->invokePrivate($client, 'isRedirect', 404));
-    }
-
-    public function testResolveRedirectUrlVariants(): void
-    {
-        $client = new AsyncHttpClient();
-
-        $absolute = $this->invokePrivate($client, 'resolveRedirectUrl', 'https://a.com/x', 'https://b.com/y');
-        self::assertSame('https://b.com/y', $absolute);
-
-        $rootRelative = $this->invokePrivate($client, 'resolveRedirectUrl', 'https://a.com/base/path', '/new');
-        self::assertSame('https://a.com/new', $rootRelative);
-
-        $relative = $this->invokePrivate($client, 'resolveRedirectUrl', 'https://a.com/base/path', 'next');
-        self::assertSame('https://a.com/base/next', $relative);
-    }
-
-    public function testExtractCookiesReadsSetCookieValues(): void
-    {
-        $client = new AsyncHttpClient();
-        $headers = new Headers();
-        $headers->add('Set-Cookie', [
-            'a=1; Path=/',
-            'b=2; HttpOnly',
-            'invalid-cookie-line',
+        $transport = new MockTransport([
+            new Response(500, new Headers(), 'boom'),
+            new Response(200, new Headers(), 'ok'),
         ]);
 
-        $cookies = $this->invokePrivate($client, 'extractCookies', $headers);
+        $client = (new AsyncHttpClient(transport: $transport))
+            ->withRetries(2)
+            ->withRetryDelay(1);
 
-        self::assertSame(['a' => '1', 'b' => '2'], $cookies);
+        $response = await($client->get('https://api.example.com/x'));
+
+        self::assertSame(200, $response->status());
+        self::assertSame('ok', $response->body());
+        self::assertCount(2, $transport->requests());
+        self::assertSame('GET', $transport->lastRequest()?->method);
     }
 
-    public function testDecodeChunkedBody(): void
+    public function testDoesNotRetryNonIdempotentRequests(): void
     {
-        $client = new AsyncHttpClient();
+        $transport = new MockTransport([
+            new Response(500, new Headers(), 'boom'),
+        ]);
 
-        $raw = "4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
-        $decoded = $this->invokePrivate($client, 'decodeChunkedBody', $raw);
+        $client = (new AsyncHttpClient(transport: $transport))
+            ->withRetries(2)
+            ->withRetryDelay(1);
 
-        self::assertSame('Wikipedia', $decoded);
+        $response = await($client->post('https://api.example.com/x', ['a' => 1]));
+
+        self::assertSame(500, $response->status());
+        self::assertCount(1, $transport->requests());
     }
 
-    public function testPrepareRequestAddsQueryHeadersAndJsonBody(): void
+    public function testRetriesConnectionErrorsForIdempotentRequests(): void
     {
-        $options = (new RequestOptions())
-            ->withUserAgent('TestAgent/1.0')
-            ->withBearerToken('token')
-            ->withCookie('sid', 'abc', 'api.example.com', '/')
-            ->withKeepAlive(true);
+        $transport = new MockTransport([
+            new ConnectionException('boom'),
+            new Response(200, new Headers(), 'ok'),
+        ]);
 
-        $request = new Request(
-            'POST',
-            'https://api.example.com/items',
-            new Headers(),
-            ['name' => 'book'],
-            ['page' => 1],
-            [],
-            null,
-            $options
-        );
+        $client = (new AsyncHttpClient(transport: $transport))
+            ->withRetries(2)
+            ->withRetryDelay(1);
 
-        $client = new AsyncHttpClient();
-        $prepared = $this->invokePrivate($client, 'prepareRequest', $request, $options);
+        $response = await($client->get('https://api.example.com/x'));
 
-        self::assertSame('https://api.example.com/items?page=1', $prepared['url']);
-        self::assertSame('POST', $prepared['method']);
-        self::assertSame('api.example.com', $prepared['headers']->get('Host'));
-        self::assertSame('keep-alive', $prepared['headers']->get('Connection'));
-        self::assertSame('TestAgent/1.0', $prepared['headers']->get('User-Agent'));
-        self::assertSame('Bearer token', $prepared['headers']->get('Authorization'));
-        self::assertStringContainsString('sid=abc', (string) $prepared['headers']->get('Cookie'));
-        self::assertSame('application/json', $prepared['headers']->get('Content-Type'));
-        self::assertSame('application/json', $prepared['headers']->get('Accept'));
-        self::assertSame('{"name":"book"}', $prepared['body']);
-        self::assertSame((string) strlen('{"name":"book"}'), $prepared['headers']->get('Content-Length'));
+        self::assertSame(200, $response->status());
+        self::assertCount(2, $transport->requests());
     }
 
-    public function testPrepareRequestSupportsFormUrlEncodedArrayBody(): void
+    public function testRethrowsConnectionErrorWhenRetriesAreExhausted(): void
     {
-        $options = new RequestOptions();
-        $request = new Request(
-            'POST',
-            'http://example.com/token',
-            new Headers(['Content-Type' => 'application/x-www-form-urlencoded']),
-            ['grant_type' => 'client_credentials', 'scope' => 'read'],
-            [],
-            [],
-            null,
-            $options
-        );
+        $transport = new MockTransport([
+            new ConnectionException('boom'),
+            new ConnectionException('boom'),
+        ]);
 
-        $client = new AsyncHttpClient();
-        $prepared = $this->invokePrivate($client, 'prepareRequest', $request, $options);
+        $client = (new AsyncHttpClient(transport: $transport))
+            ->withRetries(1)
+            ->withRetryDelay(1);
 
-        self::assertSame('grant_type=client_credentials&scope=read', $prepared['body']);
-    }
-
-    public function testPrepareRequestBuildsMultipartBodyFromFilesAndFields(): void
-    {
-        $tmpFile = tempnam(sys_get_temp_dir(), 'httpclient-multipart-');
-        self::assertNotFalse($tmpFile);
-        file_put_contents($tmpFile, 'demo-file-content');
+        $this->expectException(ConnectionException::class);
 
         try {
-            $options = new RequestOptions();
-            $request = new Request(
-                'POST',
-                'http://example.com/upload',
-                new Headers(),
-                ['meta' => ['id' => 10]],
-                [],
-                ['file1' => $tmpFile],
-                null,
-                $options
-            );
-
-            $client = new AsyncHttpClient();
-            $prepared = $this->invokePrivate($client, 'prepareRequest', $request, $options);
-
-            self::assertStringContainsString('multipart/form-data; boundary=', (string) $prepared['headers']->get('Content-Type'));
-            self::assertStringContainsString('name="meta"', $prepared['body']);
-            self::assertStringContainsString('{"id":10}', $prepared['body']);
-            self::assertStringContainsString('name="file1"', $prepared['body']);
-            self::assertStringContainsString('demo-file-content', $prepared['body']);
+            await($client->get('https://api.example.com/x'));
         } finally {
-            if (is_file($tmpFile)) {
-                unlink($tmpFile);
-            }
+            self::assertCount(2, $transport->requests());
         }
     }
 
-    public function testBuildRequestPayloadFormatsStartLineHeadersAndBody(): void
+    public function testWithMethodsKeepInjectedTransport(): void
     {
-        $client = new AsyncHttpClient();
-        $headers = new Headers([
-            'Host' => 'example.com',
-            'Content-Type' => 'application/json',
+        $transport = new MockTransport([
+            new Response(200, new Headers(), 'ok'),
         ]);
 
-        $payload = $this->invokePrivate(
-            $client,
-            'buildRequestPayload',
-            'POST',
-            '/api/items?x=1',
-            $headers,
-            '{"a":1}'
-        );
+        $client = (new AsyncHttpClient(transport: $transport))
+            ->withBaseUrl('https://api.example.com')
+            ->withHeader('X-Test', '1');
 
-        self::assertStringStartsWith("POST /api/items?x=1 HTTP/1.1\r\n", $payload);
-        self::assertStringContainsString("Host: example.com\r\n", $payload);
-        self::assertStringContainsString("Content-Type: application/json\r\n", $payload);
-        self::assertStringEndsWith("\r\n\r\n{\"a\":1}", $payload);
-    }
+        $response = await($client->get('/via-base'));
 
-    public function testReadResponseParsesContentLengthResponse(): void
-    {
-        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
-        self::assertNotFalse($sockets);
-
-        [$readSocket, $writeSocket] = $sockets;
-
-        fwrite($writeSocket, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Test: ok\r\n\r\nhello");
-        fclose($writeSocket);
-
-        $client = new AsyncHttpClient();
-        $options = (new RequestOptions())
-            ->withReadTimeout(1.0)
-            ->withTotalTimeout(1.0);
-
-        [$status, $headers, $body] = $this->invokePrivate($client, 'readResponse', $readSocket, $options);
-
-        fclose($readSocket);
-
-        self::assertSame(200, $status);
-        self::assertSame('ok', $headers->get('X-Test'));
-        self::assertSame('hello', $body);
-    }
-
-    public function testReadResponseParsesChunkedResponse(): void
-    {
-        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
-        self::assertNotFalse($sockets);
-
-        [$readSocket, $writeSocket] = $sockets;
-
-        fwrite(
-            $writeSocket,
-            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n"
-        );
-        fclose($writeSocket);
-
-        $client = new AsyncHttpClient();
-        $options = (new RequestOptions())
-            ->withReadTimeout(1.0)
-            ->withTotalTimeout(1.0);
-
-        [$status, $headers, $body] = $this->invokePrivate($client, 'readResponse', $readSocket, $options);
-
-        fclose($readSocket);
-
-        self::assertSame(200, $status);
-        self::assertStringContainsString('chunked', strtolower((string) $headers->get('Transfer-Encoding')));
-        self::assertSame('Wikipedia', $body);
-    }
-
-    public function testReadResponseParsesFragmentedLargeBody(): void
-    {
-        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
-        self::assertNotFalse($sockets);
-
-        [$readSocket, $writeSocket] = $sockets;
-        stream_set_chunk_size($readSocket, 1024);
-
-        $expected = str_repeat('payload-', 12_800);
-        $response = "HTTP/1.1 200 OK\r\nContent-Length: " . strlen($expected) . "\r\nX-Large: yes\r\n\r\n" . $expected;
-        self::assertSame(strlen($response), fwrite($writeSocket, $response));
-        fclose($writeSocket);
-
-        $client = new AsyncHttpClient();
-        $options = (new RequestOptions())
-            ->withReadTimeout(1.0)
-            ->withTotalTimeout(2.0);
-
-        [$status, $headers, $body] = $this->invokePrivate($client, 'readResponse', $readSocket, $options);
-        fclose($readSocket);
-
-        self::assertSame(200, $status);
-        self::assertSame('yes', $headers->get('X-Large'));
-        self::assertSame($expected, $body);
-    }
-
-    public function testReadResponseRejectsIncompleteContentLengthBody(): void
-    {
-        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
-        self::assertNotFalse($sockets);
-
-        [$readSocket, $writeSocket] = $sockets;
-        fwrite($writeSocket, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort");
-        fclose($writeSocket);
-
-        $this->expectException(\Omegaalfa\HttpClient\Http\Exceptions\ConnectionException::class);
-        $this->expectExceptionMessage('Incomplete HTTP response body');
-
-        $client = new AsyncHttpClient();
-        $options = (new RequestOptions())
-            ->withReadTimeout(1.0)
-            ->withTotalTimeout(1.0);
-
-        try {
-            $this->invokePrivate($client, 'readResponse', $readSocket, $options);
-        } finally {
-            fclose($readSocket);
-        }
+        self::assertSame('ok', $response->body());
+        self::assertSame('https://api.example.com/via-base', $transport->lastRequest()?->url);
     }
 
     private function invokePrivate(object $object, string $method, mixed ...$args): mixed
     {
         $reflection = new ReflectionClass($object);
         $private = $reflection->getMethod($method);
-        $private->setAccessible(true);
 
         return $private->invoke($object, ...$args);
     }

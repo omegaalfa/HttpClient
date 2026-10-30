@@ -63,12 +63,79 @@ final class StreamResponseInternalTest extends TestCase
 
         $reflection = new ReflectionClass($first);
         $ensureTimeout = $reflection->getMethod('ensureTotalTimeout');
-        $ensureTimeout->setAccessible(true);
 
         $this->expectException(\Omegaalfa\HttpClient\Http\Exceptions\TimeoutException::class);
         $ensureTimeout->invoke($first);
 
         self::assertSame('ok', $second->readChunk(2));
         self::assertNull($second->readChunk());
+    }
+
+    public function testNoBodyStreamCompletesWithoutPeerClose(): void
+    {
+        $loop = new FiberEventLoop();
+        $pool = new ConnectionPool();
+        $headers = new Headers();
+
+        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        self::assertNotFalse($sockets);
+        [$readSocket, $writeSocket] = $sockets;
+
+        // HEAD/204/304 streams carry zero bytes; completion must not depend on EOF.
+        $stream = new StreamResponse(
+            $loop,
+            $pool,
+            $readSocket,
+            (new RequestOptions())->withReadTimeout(0.2)->withTotalTimeout(1.0),
+            'k',
+            false,
+            204,
+            $headers,
+            [],
+            false,
+            '',
+            false,
+            0
+        );
+
+        self::assertNull($stream->readChunk());
+        self::assertTrue($stream->isComplete());
+
+        fclose($writeSocket);
+    }
+
+    public function testChunkedStreamDecodesIncrementally(): void
+    {
+        $loop = new FiberEventLoop();
+        $pool = new ConnectionPool();
+
+        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        self::assertNotFalse($sockets);
+        [$readSocket, $writeSocket] = $sockets;
+
+        fwrite($writeSocket, "6\r\n-world\r\n0\r\n\r\n");
+
+        $stream = new StreamResponse(
+            $loop,
+            $pool,
+            $readSocket,
+            (new RequestOptions())->withReadTimeout(1.0)->withTotalTimeout(2.0),
+            'k',
+            false,
+            200,
+            new Headers(),
+            [],
+            false,
+            "5\r\nhello\r\n",
+            true,
+            null
+        );
+
+        self::assertSame('hello', $stream->readChunk(5));
+        self::assertSame('-world', $stream->readChunk());
+        self::assertNull($stream->readChunk());
+        self::assertTrue($stream->isComplete());
+
+        fclose($writeSocket);
     }
 }

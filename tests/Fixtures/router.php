@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+// Contadores isolados por processo do servidor: execuções paralelas de testes
+// (ex.: threads do Infection) não interferem entre si.
+$counterPrefix = sys_get_temp_dir() . '/httpclient-' . getmypid() . '-';
+
 $uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 
 if ($uri === '/json') {
@@ -50,6 +54,29 @@ if ($uri === '/redirect') {
     return;
 }
 
+if ($uri === '/echo-headers') {
+    header('Content-Type: application/json');
+    echo json_encode([
+        'authorization' => $_SERVER['HTTP_AUTHORIZATION'] ?? null,
+        'cookie' => $_SERVER['HTTP_COOKIE'] ?? null,
+    ], JSON_THROW_ON_ERROR);
+    return;
+}
+
+if ($uri === '/redirect-echo') {
+    header('Location: /echo-headers', true, 302);
+    return;
+}
+
+if ($uri === '/redirect-cross-host') {
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    $port = str_contains($host, ':')
+        ? (int) substr($host, (int) strrpos($host, ':') + 1)
+        : (int) ($_SERVER['SERVER_PORT'] ?? 0);
+    header('Location: http://localhost:' . $port . '/echo-headers', true, 302);
+    return;
+}
+
 if ($uri === '/set-cookie') {
     header('Set-Cookie: session_id=abc123; Path=/');
     header('Content-Type: text/plain');
@@ -66,7 +93,7 @@ if ($uri === '/check-cookie') {
 }
 
 if ($uri === '/retry-500') {
-    $counterFile = sys_get_temp_dir() . '/httpclient-retry-counter.txt';
+    $counterFile = $counterPrefix . 'retry-counter.txt';
     $counter = 0;
     if (is_file($counterFile)) {
         $counter = (int) file_get_contents($counterFile);
@@ -80,7 +107,7 @@ if ($uri === '/retry-500') {
 }
 
 if ($uri === '/retry-reset') {
-    $counterFile = sys_get_temp_dir() . '/httpclient-retry-counter.txt';
+    $counterFile = $counterPrefix . 'retry-counter.txt';
     if (is_file($counterFile)) {
         unlink($counterFile);
     }
@@ -91,7 +118,7 @@ if ($uri === '/retry-reset') {
 }
 
 if ($uri === '/retry-counter') {
-    $counterFile = sys_get_temp_dir() . '/httpclient-retry-counter.txt';
+    $counterFile = $counterPrefix . 'retry-counter.txt';
     $counter = is_file($counterFile) ? (int) file_get_contents($counterFile) : 0;
     header('Content-Type: application/json');
     echo json_encode(['count' => $counter], JSON_THROW_ON_ERROR);
@@ -102,6 +129,21 @@ if ($uri === '/slow-read') {
     usleep(300_000);
     header('Content-Type: application/json');
     echo json_encode(['ok' => true], JSON_THROW_ON_ERROR);
+    return;
+}
+
+if ($uri === '/no-content') {
+    http_response_code(204);
+    return;
+}
+
+if ($uri === '/gzip') {
+    header('Content-Type: application/json');
+    header('Content-Encoding: gzip');
+    echo gzencode(json_encode([
+        'ok' => true,
+        'accept_encoding' => $_SERVER['HTTP_ACCEPT_ENCODING'] ?? null,
+    ], JSON_THROW_ON_ERROR));
     return;
 }
 
@@ -185,7 +227,7 @@ if ($uri === '/stream-total-timeout') {
 }
 
 if ($uri === '/stream-mid-reset') {
-    $counterFile = sys_get_temp_dir() . '/httpclient-stream-mid-counter.txt';
+    $counterFile = $counterPrefix . 'stream-mid-counter.txt';
     if (is_file($counterFile)) {
         unlink($counterFile);
     }
@@ -196,7 +238,7 @@ if ($uri === '/stream-mid-reset') {
 }
 
 if ($uri === '/stream-mid-counter') {
-    $counterFile = sys_get_temp_dir() . '/httpclient-stream-mid-counter.txt';
+    $counterFile = $counterPrefix . 'stream-mid-counter.txt';
     $counter = is_file($counterFile) ? (int) file_get_contents($counterFile) : 0;
     header('Content-Type: application/json');
     echo json_encode(['count' => $counter], JSON_THROW_ON_ERROR);
@@ -204,7 +246,7 @@ if ($uri === '/stream-mid-counter') {
 }
 
 if ($uri === '/stream-mid-fail') {
-    $counterFile = sys_get_temp_dir() . '/httpclient-stream-mid-counter.txt';
+    $counterFile = $counterPrefix . 'stream-mid-counter.txt';
     $counter = is_file($counterFile) ? (int) file_get_contents($counterFile) : 0;
     $counter++;
     file_put_contents($counterFile, (string) $counter);

@@ -1,6 +1,6 @@
 {
   "name": "omegaalfa/http-client",
-  "description": "A lightweight, high-performance asynchronous HTTP client for modern PHP applications powered by FiberEventLoop.",
+  "description": "A lightweight, high-performance asynchronous HTTP client for modern PHP applications powered b FiberEventLoop.",
   "type": "library",
   "license": "MIT",
   "keywords": [
@@ -42,13 +42,29 @@
   "require-dev": {
     "guzzlehttp/guzzle": "^7.15.1",
     "roave/security-advisories": "dev-latest",
-    "phpunit/phpunit": "^11.5"
+    "infection/infection": "^0.35.8",
+    "phpstan/phpstan": "^2.1",
+    "phpunit/phpunit": "^11.5",
+    "friendsofphp/php-cs-fixer": "^3.95"
   },
   "scripts": {
     "test": "phpunit -c phpunit.xml.dist",
     "test-coverage": "phpunit -c phpunit.xml.dist --coverage-html=coverage --coverage-text",
     "test-verbose": "phpunit -c phpunit.xml.dist --display-all-issues",
     "test-filter": "phpunit -c phpunit.xml.dist --filter",
-    "test-stop-on-failure": "phpunit -c phpunit.xml.dist --stop-on-failure"
+    "test-stop-on-failure": "phpunit -c phpunit.xml.dist --stop-on-failure",
+    "quality:stan": "phpstan analyse --configuration=phpstan.neon",
+    "quality:cs": "php-cs-fixer fix --dry-run --diff --allow-risky=yes --config=.php-cs-fixer.php",
+    "quality:mutation": "infection --configuration=infection.json5 --test-framework=phpunit --threads=1 --min-msi=60",
+    "quality": [
+      "@quality:stan",
+      "@quality:cs"
+    ]
+  },
+  "config": {
+    "allow-plugins": {
+      "infection/extension-installer": true
+    },
+    "process-timeout": 0
   }
 }

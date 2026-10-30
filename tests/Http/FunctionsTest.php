@@ -8,6 +8,7 @@ use InvalidArgumentException;
 use Omegaalfa\FiberEventLoop\FiberEventLoop;
 use Omegaalfa\FiberEventLoop\Future;
 use PHPUnit\Framework\TestCase;
+
 use function Omegaalfa\HttpClient\Http\await;
 use function Omegaalfa\HttpClient\Http\awaitAll;
 use function Omegaalfa\HttpClient\Http\awaitAny;
@@ -66,6 +67,75 @@ final class FunctionsTest extends TestCase
         self::assertSame('fast', $result['value']);
     }
 
+    public function testAwaitAnyReturnsFirstSettledNotFirstInList(): void
+    {
+        $loop = new FiberEventLoop();
+
+        // Nenhum assenta nos primeiros ticks baratos: o vencedor precisa ser o
+        // primeiro a assentar, não o primeiro da lista.
+        $slow = $loop->async(static function () use ($loop): string {
+            for ($i = 0; $i < 40_000; $i++) {
+                $loop->next();
+            }
+
+            return 'slow';
+        });
+
+        $fast = $loop->async(static function () use ($loop): string {
+            for ($i = 0; $i < 20_000; $i++) {
+                $loop->next();
+            }
+
+            return 'fast';
+        });
+
+        $result = await($loop->async(static fn (): array => awaitAny(['slow' => $slow, 'fast' => $fast])));
+
+        self::assertSame('fast', $result['key']);
+        self::assertSame('fast', $result['value']);
+    }
+
+    public function testAwaitAnyResolvesFirstSettledFutureOutsideFiber(): void
+    {
+        $loop = new FiberEventLoop();
+
+        // Espera no padrão do cliente (timer + suspensão via next()), como o
+        // polling de socket faz durante I/O real.
+        $slow = $loop->async(static function () use ($loop): string {
+            $done = false;
+            $loop->after(static function () use (&$done): void {
+                $done = true;
+            }, 0.3);
+
+            while (!$done) {
+                $loop->next();
+            }
+
+            return 'slow';
+        });
+
+        $fast = $loop->async(static function () use ($loop): string {
+            $done = false;
+            $loop->after(static function () use (&$done): void {
+                $done = true;
+            }, 0.05);
+
+            while (!$done) {
+                $loop->next();
+            }
+
+            return 'fast';
+        });
+
+        $start = microtime(true);
+        $result = awaitAny(['a' => $slow, 'b' => $fast]);
+        $elapsed = microtime(true) - $start;
+
+        self::assertSame('b', $result['key']);
+        self::assertSame('fast', $result['value']);
+        self::assertLessThan(0.25, $elapsed, 'awaitAny must return on the first settled future, not wait for the slowest.');
+    }
+
     public function testRaceReturnsWinnerValue(): void
     {
         $loop = new FiberEventLoop();
@@ -92,8 +162,10 @@ final class FunctionsTest extends TestCase
         ]);
 
         self::assertSame('fulfilled', $result['ok']['state']);
+        self::assertArrayHasKey('value', $result['ok']);
         self::assertSame(10, $result['ok']['value']);
         self::assertSame('rejected', $result['fail']['state']);
+        self::assertArrayHasKey('reason', $result['fail']);
         self::assertInstanceOf(\RuntimeException::class, $result['fail']['reason']);
     }
 }

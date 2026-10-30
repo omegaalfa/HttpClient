@@ -9,7 +9,7 @@ use RuntimeException;
 final class LocalHttpServer
 {
     /**
-     * @var resource|null
+     * @var resource|false|null
      */
     private $process = null;
 
@@ -26,13 +26,17 @@ final class LocalHttpServer
     public function start(string $routerPath, string $workingDirectory): void
     {
         $phpBinary = PHP_BINARY;
-        $command = sprintf(
-            '%s -n -S %s:%d %s',
-            escapeshellarg($phpBinary),
-            $this->host,
-            $this->port,
-            escapeshellarg($routerPath)
-        );
+
+        // Comando em array evita o wrapper de shell do proc_open: o
+        // proc_terminate atinge o processo PHP diretamente e nenhum órfão
+        // sobra segurando os pipes do runner de testes.
+        $command = [
+            $phpBinary,
+            '-n',
+            '-S',
+            sprintf('%s:%d', $this->host, $this->port),
+            $routerPath,
+        ];
 
         $descriptors = [
             0 => ['pipe', 'r'],
@@ -62,6 +66,13 @@ final class LocalHttpServer
         }
 
         proc_terminate($this->process);
+
+        $status = proc_get_status($this->process);
+        if ($status['running']) {
+            usleep(50_000);
+            proc_terminate($this->process, 9);
+        }
+
         proc_close($this->process);
         $this->process = null;
     }

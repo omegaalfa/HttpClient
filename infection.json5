@@ -1,0 +1,21 @@
+{
+    // Configuração do Infection (mutation testing) — executado via
+    // `composer quality:mutation`. Os limiares de MSI são o quality gate.
+    "$schema": "vendor/infection/infection/resources/schema.json",
+
+    "source": {
+        "directories": ["src"]
+    },
+
+    "logs": {
+        "text": "build/infection.log",
+        "perMutator": "build/infection-per-mutator.log"
+    },
+
+    "mutators": {
+        "@default": true
+    },
+
+    // Cada mutante roda apenas os testes que cobrem o código mutado.
+    "timeout": 10
+}

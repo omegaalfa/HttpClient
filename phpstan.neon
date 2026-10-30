@@ -1,0 +1,14 @@
+parameters:
+    # Nível máximo de checagens; os problemas existentes no código atual estão
+    # registrados em phpstan-baseline.neon (não alterar src/ enquanto não houver
+    # autorização — novas mudanças devem entrar limpas ou atualizar o baseline
+    # conscientemente).
+    level: 8
+
+    paths:
+        - src
+        - tests
+
+    # Entradas de validação de API (ex.: awaitAny() valida instanceof Future em
+    # arrays vindos do usuário) são intencionais em runtime.
+    treatPhpDocTypesAsCertain: false

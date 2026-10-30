@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Tests\Omegaalfa\HttpClient\Http;
 
 use Omegaalfa\HttpClient\Http\RequestOptions;
+use Omegaalfa\HttpClient\Http\Headers;
+use Omegaalfa\HttpClient\Http\CookieJar;
 use PHPUnit\Framework\TestCase;
 
 final class RequestOptionsTest extends TestCase
@@ -21,12 +23,13 @@ final class RequestOptionsTest extends TestCase
         self::assertSame(3, $options->followRedirects);
         self::assertTrue($options->verifySsl);
         self::assertFalse($options->keepAlive);
+        self::assertFalse($options->compression);
         self::assertSame(10.0, $options->connectTimeout);
         self::assertSame(30.0, $options->readTimeout);
         self::assertSame(30.0, $options->writeTimeout);
         self::assertSame(60.0, $options->totalTimeout);
-        self::assertNotNull($options->headers);
-        self::assertNotNull($options->cookieJar);
+        self::assertInstanceOf(Headers::class, $options->headers);
+        self::assertInstanceOf(CookieJar::class, $options->cookieJar);
     }
 
     public function testWithHeaderAndWithHeadersAreImmutable(): void
@@ -38,6 +41,17 @@ final class RequestOptionsTest extends TestCase
         self::assertNull($base->headers->get('X-Two'));
         self::assertSame('1', $changed->headers->get('X-One'));
         self::assertSame('2', $changed->headers->get('X-Two'));
+    }
+
+    public function testWithCompressionTogglesFlagImmutably(): void
+    {
+        $base = new RequestOptions();
+        $enabled = $base->withCompression();
+        $disabled = $enabled->withCompression(false);
+
+        self::assertFalse($base->compression);
+        self::assertTrue($enabled->compression);
+        self::assertFalse($disabled->compression);
     }
 
     public function testWithBaseUrlTrimsTrailingSlash(): void

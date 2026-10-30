@@ -31,6 +31,13 @@ final class LocalHttpsServer
         }
 
         proc_terminate($this->process);
+
+        $status = proc_get_status($this->process);
+        if ($status['running']) {
+            usleep(50_000);
+            proc_terminate($this->process, 9);
+        }
+
         proc_close($this->process);
         $this->process = null;
     }
@@ -48,14 +55,16 @@ final class LocalHttpsServer
     private function start(string $certPath): void
     {
         $script = __DIR__ . '/../Fixtures/https-server.php';
-        $command = sprintf(
-            '%s %s %s %d %s',
-            escapeshellarg(PHP_BINARY),
-            escapeshellarg($script),
-            escapeshellarg($this->host),
-            $this->port,
-            escapeshellarg($certPath)
-        );
+
+        // Comando em array evita o wrapper de shell do proc_open: o
+        // proc_terminate atinge o processo PHP diretamente.
+        $command = [
+            PHP_BINARY,
+            $script,
+            $this->host,
+            (string)$this->port,
+            $certPath,
+        ];
 
         $descriptors = [
             0 => ['pipe', 'r'],

@@ -71,4 +71,64 @@ final class CookieJarTest extends TestCase
 
         self::assertSame('pref=pt', $jar->headerFor('service.local', '/', false));
     }
+
+    public function testHeaderForMatchesDomainOnlyAtLabelBoundary(): void
+    {
+        $jar = new CookieJar();
+        $jar->set('session', 'secret', 'evil.com', '/');
+
+        self::assertNull($jar->headerFor('notevil.com', '/', false));
+        self::assertNull($jar->headerFor('xevil.com', '/', false));
+        self::assertSame('session=secret', $jar->headerFor('evil.com', '/', false));
+        self::assertSame('session=secret', $jar->headerFor('x.evil.com', '/', false));
+    }
+
+    public function testStoreFromHeadersRejectsDomainNotMatchingOriginHost(): void
+    {
+        $headers = new Headers();
+        $headers->add('Set-Cookie', 'session=leak; Domain=bank.com; Path=/');
+
+        $jar = new CookieJar();
+        $jar->storeFromHeaders($headers, 'evil.com');
+
+        self::assertSame([], $jar->all());
+        self::assertNull($jar->headerFor('evil.com', '/', false));
+        self::assertNull($jar->headerFor('bank.com', '/', false));
+    }
+
+    public function testStoreFromHeadersRejectsDomainWithoutLabelBoundaryMatch(): void
+    {
+        $headers = new Headers();
+        $headers->add('Set-Cookie', 'session=leak; Domain=vil.com; Path=/');
+
+        $jar = new CookieJar();
+        $jar->storeFromHeaders($headers, 'evil.com');
+
+        self::assertSame([], $jar->all());
+    }
+
+    public function testStoreFromHeadersAcceptsParentDomain(): void
+    {
+        $headers = new Headers();
+        $headers->add('Set-Cookie', 'token=ok; Domain=.example.com; Path=/');
+
+        $jar = new CookieJar();
+        $jar->storeFromHeaders($headers, 'api.example.com');
+
+        self::assertSame('token=ok', $jar->headerFor('api.example.com', '/', false));
+        self::assertSame('token=ok', $jar->headerFor('other.example.com', '/', false));
+        self::assertNull($jar->headerFor('example.org', '/', false));
+    }
+
+    public function testStoreFromHeadersIgnoresEmptyDomainAttribute(): void
+    {
+        $headers = new Headers();
+        $headers->add('Set-Cookie', 'pref=1; Domain=; Path=/');
+
+        $jar = new CookieJar();
+        $jar->storeFromHeaders($headers, 'service.local');
+
+        self::assertSame('pref=1', $jar->headerFor('service.local', '/', false));
+        self::assertNull($jar->headerFor('other.local', '/', false));
+    }
 }

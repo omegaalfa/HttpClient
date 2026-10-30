@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Omegaalfa\HttpClient\Http;
 
+use InvalidArgumentException;
 use Omegaalfa\HttpClient\Http\Headers;
 use PHPUnit\Framework\TestCase;
 
@@ -117,5 +118,33 @@ final class HeadersTest extends TestCase
         }
 
         self::assertSame(['X-A' => '1', 'X-B' => '2'], $iterated);
+    }
+
+    public function testSetRejectsCrlfInValue(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        (new Headers())->set('X-Trace', "ok\r\nX-Injected: pwned");
+    }
+
+    public function testSetRejectsCrlfInName(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        (new Headers())->set("X-Test\r\nX-Evil", 'v');
+    }
+
+    public function testAddRejectsNulByteInValue(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        (new Headers())->add('X-Test', ['a', "b\0c"]);
+    }
+
+    public function testConstructorRejectsControlChars(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new Headers(['X-Test' => "a\nb"]);
     }
 }

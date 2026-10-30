@@ -11,6 +11,7 @@ use Omegaalfa\HttpClient\Http\MultipartBuilder;
 use Omegaalfa\HttpClient\Http\SseEvent;
 use PHPUnit\Framework\TestCase;
 use Tests\Omegaalfa\HttpClient\Support\LocalHttpServer;
+
 use function Omegaalfa\HttpClient\Http\await;
 
 final class AsyncHttpClientIntegrationTest extends TestCase
@@ -43,6 +44,57 @@ final class AsyncHttpClientIntegrationTest extends TestCase
         self::assertSame('pt-BR', $data['query']['lang']);
     }
 
+    public function testHeadRequestReturnsHeadersWithEmptyBody(): void
+    {
+        $client = new AsyncHttpClient();
+        $response = await($client->head(self::$server->baseUrl() . '/json'));
+
+        self::assertSame(200, $response->status());
+        self::assertSame('', $response->body());
+        self::assertStringContainsString('application/json', (string) $response->headers()->get('Content-Type'));
+    }
+
+    public function testNoContentResponseHasEmptyBody(): void
+    {
+        $client = new AsyncHttpClient();
+        $response = await($client->get(self::$server->baseUrl() . '/no-content'));
+
+        self::assertSame(204, $response->status());
+        self::assertSame('', $response->body());
+    }
+
+    public function testGzipIsNegotiatedAndDecodedWhenEnabled(): void
+    {
+        $client = (new AsyncHttpClient())->withCompression();
+        $response = await($client->get(self::$server->baseUrl() . '/gzip'));
+        $data = $response->json();
+
+        self::assertSame(200, $response->status());
+        self::assertSame('gzip', $data['accept_encoding']);
+        self::assertTrue($data['ok']);
+    }
+
+    public function testGzipResponseIsDecodedEvenWithoutNegotiation(): void
+    {
+        $client = new AsyncHttpClient();
+        $response = await($client->get(self::$server->baseUrl() . '/gzip'));
+        $data = $response->json();
+
+        self::assertSame(200, $response->status());
+        self::assertNull($data['accept_encoding']);
+        self::assertTrue($data['ok']);
+    }
+
+    public function testStreamHeadRequestCompletesImmediately(): void
+    {
+        $client = new AsyncHttpClient();
+        $stream = await($client->streamRequest('HEAD', self::$server->baseUrl() . '/json'));
+
+        self::assertSame(200, $stream->status());
+        self::assertNull($stream->readChunk());
+        self::assertTrue($stream->isComplete());
+    }
+
     public function testPostJsonBody(): void
     {
         $client = (new AsyncHttpClient())->withJson();
@@ -73,6 +125,39 @@ final class AsyncHttpClientIntegrationTest extends TestCase
         self::assertTrue($data['ok']);
     }
 
+    public function testSameOriginRedirectKeepsCredentials(): void
+    {
+        $client = (new AsyncHttpClient())
+            ->withFollowRedirects(3)
+            ->withBearerToken('secret-token')
+            ->withHeader('Cookie', 'manual=1');
+
+        $response = await($client->get(self::$server->baseUrl() . '/redirect-echo'));
+        $data = $response->json();
+
+        self::assertSame(200, $response->status());
+        self::assertTrue($response->redirected());
+        self::assertSame('Bearer secret-token', $data['authorization']);
+        self::assertSame('manual=1', $data['cookie']);
+    }
+
+    public function testCrossHostRedirectStripsCredentials(): void
+    {
+        $client = (new AsyncHttpClient())
+            ->withFollowRedirects(3)
+            ->withBearerToken('secret-token')
+            ->withHeader('Cookie', 'manual=1');
+
+        // 127.0.0.1 -> localhost: mesma máquina, hosts diferentes => cross-origin.
+        $response = await($client->get(self::$server->baseUrl() . '/redirect-cross-host'));
+        $data = $response->json();
+
+        self::assertSame(200, $response->status());
+        self::assertTrue($response->redirected());
+        self::assertNull($data['authorization']);
+        self::assertNull($data['cookie']);
+    }
+
     public function testCookieJarStoresAndSendsCookiesAutomatically(): void
     {
         $client = new AsyncHttpClient();
@@ -92,6 +177,20 @@ final class AsyncHttpClientIntegrationTest extends TestCase
 
         $client = new AsyncHttpClient();
         await($client->get('http://')); // Invalid host, should trigger connection error path.
+    }
+
+    public function testConnectionRefusedIsReportedAsConnectionFailure(): void
+    {
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessageMatches('/^Connection failed:/');
+
+        $client = (new AsyncHttpClient())
+            ->connectTimeout(2.0)
+            ->totalTimeout(3.0);
+
+        // Porta 1 não tem listener: o connect assíncrono falha e precisa ser
+        // reportado como falha de conexão (não como falha de escrita).
+        await($client->get('http://127.0.0.1:1/refused'));
     }
 
     public function testFollowRedirectsDisabledKeepsOriginalStatus(): void

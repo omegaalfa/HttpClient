@@ -31,6 +31,13 @@ final class LocalConnectProxyServer
         }
 
         proc_terminate($this->process);
+
+        $status = proc_get_status($this->process);
+        if ($status['running']) {
+            usleep(50_000);
+            proc_terminate($this->process, 9);
+        }
+
         proc_close($this->process);
         $this->process = null;
     }
@@ -43,15 +50,17 @@ final class LocalConnectProxyServer
     private function start(): void
     {
         $script = __DIR__ . '/../Fixtures/connect-proxy.php';
-        $command = sprintf(
-            '%s %s %s %d %s %d',
-            escapeshellarg(PHP_BINARY),
-            escapeshellarg($script),
-            escapeshellarg($this->host),
-            $this->port,
-            escapeshellarg($this->targetHost),
-            $this->targetPort
-        );
+
+        // Comando em array evita o wrapper de shell do proc_open: o
+        // proc_terminate atinge o processo PHP diretamente.
+        $command = [
+            PHP_BINARY,
+            $script,
+            $this->host,
+            (string)$this->port,
+            $this->targetHost,
+            (string)$this->targetPort,
+        ];
 
         $descriptors = [
             0 => ['pipe', 'r'],

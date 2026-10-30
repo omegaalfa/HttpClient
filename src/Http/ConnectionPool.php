@@ -114,10 +114,6 @@ final class ConnectionPool
      */
     private function isReusable($socket): bool
     {
-        if (feof($socket)) {
-            return false;
-        }
-
         $read = [$socket];
         $write = [];
         $except = [];

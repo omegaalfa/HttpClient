@@ -1,0 +1,141 @@
+name: 🧪 CI
+
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    name: Mutation testing
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup PHP with PCOV
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          coverage: pcov
+          extensions: sockets
+          tools: composer:v2
+
+      - name: Cache Composer packages
+        id: composer-cache
+        uses: actions/cache@v5
+        with:
+          path: vendor
+          key: ${{ runner.os }}-php-mutation-${{ hashFiles('**/composer.json') }}
+          restore-keys: |
+            ${{ runner.os }}-php-
+
+      - name: Install dependencies
+        run: composer install --no-progress --prefer-dist --optimize-autoloader
+
+      - name: Run Infection (composer quality:mutation)
+        run: composer quality:mutation
+
+      - name: Upload Infection logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: infection-logs
+          path: build/
+          if-no-files-found: ignore
+
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ["8.4", "8.5"]
+    name: ⚙️ Running tests on PHP ${{ matrix.php }}
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # ==========================
+      # 🔍 Detect commit range
+      # ==========================
+      - name: Determine commit range
+        id: commit-range
+        run: |
+          git fetch --prune
+          LAST_COMMIT=$(git rev-parse ${{ github.event.before }} 2>/dev/null || git rev-parse HEAD~1)
+          CURRENT_COMMIT=$(git rev-parse HEAD)
+          echo "LAST_COMMIT=$LAST_COMMIT" >> $GITHUB_ENV
+          echo "CURRENT_COMMIT=$CURRENT_COMMIT" >> $GITHUB_ENV
+          echo "Debug: Commit range $LAST_COMMIT..$CURRENT_COMMIT"
+
+      # ==========================
+      # 🚫 Skip Dependabot commits
+      # ==========================
+      - name: Skip check for Dependabot
+        if: ${{ github.actor == 'dependabot[bot]' }}
+        run: echo "Skipping Conventional Commit check for Dependabot." && exit 0
+
+      # ==========================
+      # 🧩 Check commit messages
+      # ==========================
+      - name: Check commit messages
+        id: commit-check
+        run: |
+          COMMITS=$(git log --format='%s' "${LAST_COMMIT}..${CURRENT_COMMIT}")
+          echo "Debug: All commits in range:"
+          echo "$COMMITS"
+          CONVENTIONAL_COMMITS=$(echo "$COMMITS" | grep -E '^(feat|fix|docs|style|refactor|test|build|perf|ci|chore|revert|merge|wip): ' || true)
+          echo "Debug: Conventional commits found:"
+          echo "$CONVENTIONAL_COMMITS"
+          echo "stdout<<EOF" >> $GITHUB_OUTPUT
+          echo "$CONVENTIONAL_COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Verify commit messages
+        run: |
+          echo "Debug: Commit check output: '${{ steps.commit-check.outputs.stdout }}'"
+          if [ -n "${{ steps.commit-check.outputs.stdout }}" ]; then
+            echo "✅ Commit messages follow Conventional Commits specification."
+          else
+            echo "❌ Some commit messages do not follow Conventional Commits specification."
+            git log --format='%s' "${LAST_COMMIT}..${CURRENT_COMMIT}"
+            exit 1
+          fi
+
+      # ==========================
+      # ⚙️ Setup PHP + Tools
+      # ==========================
+      - name: 🧰 Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: xdebug
+          extensions: sockets
+          tools: composer:v2
+
+      - name: 🔍 Check PHP version
+        run: php -v
+
+      - name: 📦 Cache Composer packages
+        id: composer-cache
+        uses: actions/cache@v5
+        with:
+          path: vendor
+          key: ${{ runner.os }}-php-tests-${{ matrix.php }}-${{ hashFiles('**/composer.json') }}
+          restore-keys: |
+            ${{ runner.os }}-php-
+
+      - name: 📥 Install dependencies
+        run: composer install --no-progress --prefer-dist --optimize-autoloader
+
+      # ==========================
+      # 🧪 Tests + Coverage
+      # ==========================
+      - name: ✅ Run tests
+        run: vendor/bin/phpunit --colors=always --testdox
+
+      - name: 🧪 Generate coverage report
+        run: vendor/bin/phpunit --coverage-text --coverage-clover=coverage.xml

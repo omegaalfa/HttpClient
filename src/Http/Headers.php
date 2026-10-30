@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace Omegaalfa\HttpClient\Http;
 
 use Countable;
+use InvalidArgumentException;
 use IteratorAggregate;
 use Traversable;
 
+/** @implements IteratorAggregate<string, string> */
 final class Headers implements Countable, IteratorAggregate
 {
     /**
@@ -15,6 +17,7 @@ final class Headers implements Countable, IteratorAggregate
      */
     private array $items = [];
 
+    /** @param iterable<array-key, string|list<string>> $headers */
     public function __construct(iterable $headers = [])
     {
         foreach ($headers as $name => $value) {
@@ -26,6 +29,7 @@ final class Headers implements Countable, IteratorAggregate
         }
     }
 
+    /** @param iterable<array-key, string|list<string>>|self $headers */
     public static function from(self|iterable $headers): self
     {
         if ($headers instanceof self) {
@@ -38,7 +42,10 @@ final class Headers implements Countable, IteratorAggregate
     public static function fromRaw(string $rawHeaders): self
     {
         $headers = new self();
-        $lines = preg_split('/\r\n|\n|\r/', trim($rawHeaders)) ?: [];
+        $rawHeaders = trim($rawHeaders, "\r\n");
+        $lines = str_contains($rawHeaders, "\r\n")
+            ? explode("\r\n", $rawHeaders)
+            : (preg_split('/\r\n|\n|\r/', $rawHeaders) ?: []);
 
         foreach ($lines as $line) {
             if (!str_contains($line, ':')) {
@@ -52,10 +59,16 @@ final class Headers implements Countable, IteratorAggregate
         return $headers;
     }
 
+    /** @param string|array<array-key, mixed> $value */
     public function set(string $name, string|array $value): self
     {
+        $this->assertNoControlChars($name, 'Header name');
         $normalized = $this->normalize($name);
         $values = array_map(static fn (mixed $item): string => (string) $item, (array) $value);
+        foreach ($values as $item) {
+            $this->assertNoControlChars($item, 'Header value');
+        }
+
         $this->items[$normalized] = [
             'name' => $name,
             'values' => array_values($values),
@@ -64,10 +77,15 @@ final class Headers implements Countable, IteratorAggregate
         return $this;
     }
 
+    /** @param string|array<array-key, mixed> $value */
     public function add(string $name, string|array $value): self
     {
+        $this->assertNoControlChars($name, 'Header name');
         $normalized = $this->normalize($name);
         $values = array_map(static fn (mixed $item): string => (string) $item, (array) $value);
+        foreach ($values as $item) {
+            $this->assertNoControlChars($item, 'Header value');
+        }
 
         if (!isset($this->items[$normalized])) {
             $this->items[$normalized] = [
@@ -113,6 +131,7 @@ final class Headers implements Countable, IteratorAggregate
         return $this;
     }
 
+    /** @param iterable<array-key, string|list<string>>|self $headers */
     public function merge(self|iterable $headers): self
     {
         $merged = clone $this;
@@ -166,5 +185,12 @@ final class Headers implements Countable, IteratorAggregate
     private function normalize(string $name): string
     {
         return strtolower(trim($name));
+    }
+
+    private function assertNoControlChars(string $text, string $subject): void
+    {
+        if (preg_match('/[\r\n\0]/', $text) === 1) {
+            throw new InvalidArgumentException("{$subject} must not contain CR, LF or NUL characters");
+        }
     }
 }

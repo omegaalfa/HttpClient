@@ -12,6 +12,7 @@ use Omegaalfa\HttpClient\Http\StreamResponse;
 use RuntimeException;
 use Traversable;
 
+/** @implements IteratorAggregate<int, SseEvent> */
 final class SseStream implements IteratorAggregate
 {
     /**
