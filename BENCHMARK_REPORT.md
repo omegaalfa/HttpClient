@@ -10,34 +10,35 @@
 > de conexões. Toda menção a cURL nesta análise refere-se ao baseline Guzzle do benchmark
 > (que usa `CurlFactory`/`curl_multi`) e às oportunidades de configuração desse lado.
 
-> **Atualização em 31/10/2026:** as seções 1–6 preservam análises e medições
-> históricas. Recomendações antigas sobre polling e limitações de headers/SSE
-> foram parcialmente superadas; consulte as seções 7–8 para a metodologia atual e
-> a comparação mais recente. Resultados de execuções isoladas são indicativos, não
+> **Atualização em 31/10/2026:** as seções 2.1–2.4 e 6 preservam métricas históricas.
+> As seções 1, 3–5 e 7–9 descrevem o código, as correções e a metodologia atuais;
+> a seção 8 contém a comparação mais recente. Resultados de execuções isoladas são indicativos, não
 > uma garantia de ganho ou regressão.
 
-## 1. Resumo Executivo
+## 1. Resumo Executivo — estado atual
 
-Em três execuções completas (44s, 44s e 43s de duração total), o Omegaalfa HttpClient
-apresentou **latência média 15–24% menor em requisições seriais**, **11–20% menor em
-payloads de 100KB** e **vantagem consistente de 31–42% em concorrência com latência
-simulada** (cenário mais próximo de uso real com APIs externas). Nos cenários dominados
-por latência de rede (10ms e 150ms), a diferença entre as bibliotecas cai para <3% — o
-tempo de rede domina, como esperado.
+O benchmark mais recente foi executado em 31/10/2026 com PHP 8.5.4, OPcache CLI e JIT
+desativados. O cliente completou todos os cenários sem falhas, usando 8–10 MB de pico
+acumulado. No cenário concorrente com latência, mediu **767,62 req/s** e **P95 de lote
+32,8286 ms**. Comparado à execução-base anterior às correções, isso representa **+0,2%
+de RPS** e **−0,6% no P95**. Os seis resultados detalhados estão na seção 8.
 
-O único cenário onde o Guzzle foi superior no baseline foi o **batch pequeno sem latência**
-(lotes de 25 requisições instantâneas em localhost): −16,3% para o Omegaalfa. Porém, na
-execução com configuração de produção (OPcache CLI + JIT, sem Xdebug), **essa diferença
-desaparece e inverte** (Omegaalfa +0,8%): o overhead residual é de interpretação de PHP
-puro, não de I/O — e desaparece com JIT ativo.
+O código atual espera prontidão de sockets via `HttpClientEventLoop`, faz o connect TCP e
+handshake TLS sem bloquear a Fiber, limita headers HTTP/SSE e aplica as correções de
+redirect, formulário, timeout e isolamento de cookies descritas na seção 9. O benchmark
+local mede HTTP, não TLS, e cada coluna da comparação da seção 8 vem de uma execução;
+variações pequenas não demonstram ganho nem regressão estatística.
 
-**Veredito:** a biblioteca é eficiente e competitiva com a implementação em C (cURL) do
-Guzzle, vencendo em 5 de 6 cenários de fábrica e em 6 de 6 com configuração de produção.
-O consumo de memória é estável (8 MB de pico mesmo com 25 lotes concorrentes de 100KB).
-A principal margem de ganho está em **tornar o loop de espera de I/O orientado a eventos**
-(em vez de polling cooperativo) e em micro-otimizações de parsing de headers.
+**Conclusão:** as alterações avaliadas mantiveram o desempenho do cenário batch + latência
+e não mudaram a arquitetura do caminho comum de I/O HTTP. DNS continua sendo resolvido
+sistemicamente e pode bloquear; a proteção de cookies cobre sufixos públicos comuns, mas
+não substitui uma Public Suffix List completa.
 
 ## 2. Métricas Coletadas (`php benchmark.php`)
+
+> As execuções 2.1–2.4 abaixo são registros de versões/metodologias anteriores. Para
+> resultados do código e do script atuais, use a seção 8; os números antigos não devem
+> ser tratados como baseline direto.
 
 ### 2.4 Drenagem de Fibers prontos — modo interpretado, sem JIT
 
@@ -108,252 +109,46 @@ Com a configuração de produção, o Omegaalfa passa a vencer **todos os 6 cen�
 100% PHP (vs caminho em C do cURL), ele se beneficia **mais** de OPcache/JIT do que o
 Guzzle — a comparação justa entre as libs é a do run 3.
 
-## 3. Gargalos Identificados
+## 3. Leitura dos resultados atuais
 
-### 3.1 I/O e handles de transporte (cURL no baseline; sockets no Omegaalfa)
+A seção 8 compara uma execução anterior às correções com uma execução do código final,
+com os mesmos parâmetros e sem JIT. O batch + latência ficou em 767,62 req/s (+0,2%)
+e P95 de lote 32,8286 ms (−0,6%). O batch pequeno ficou 4,6% abaixo em RPS e 4,8%
+acima no P95 nessa rodada. Como cada número representa uma única execução, não se deve
+atribuir essas diferenças ao código sem repetir o teste e comparar medianas.
 
-- **Polling cooperativo no aguardo de I/O** (`SocketTransport::waitForSocket()`,
-  `src/Http/SocketTransport.php:747` e `StreamResponse::waitForReadable()`,
-  `src/Http/StreamResponse.php:254`): o loop faz `stream_select(..., 0, 0)` (timeout zero)
-  seguido de `$this->loop->next()` **a cada iteração**. Com N requisições concorrentes,
-  cada passo do event loop executa N `stream_select` + N trocas de Fiber. É o maior
-  consumidor de CPU no cenário de batch — e explica a derrota parcial no batch puro do
-  baseline. O `curl_multi` do Guzzle resolve isso em C com um único poll por iteração.
-- **Reuso de conexões:** efetivo — o `ConnectionPool` (habilitado com `withKeepAlive(true)`
-  no benchmark) sustenta 0,6 ms/requisição serial em localhost (sem custo de handshake por
-  request). Porém, `ConnectionPool::isReusable()` (`src/Http/ConnectionPool.php:115`)
-  executa `feof()` + `stream_select` em cada `acquire()` — 2 syscalls extras por requisição.
-- **cURL Share Handles (lado Guzzle):** o `CurlFactory` do Guzzle 7 suporta share handles
-  (`TransportSharing`/`CurlShareHandle`, para compartilhar caches de DNS/SSL entre handles),
-  mas o padrão é `TransportSharing::NONE` e o benchmark não o habilita. O pool de easy
-  handles em si é eficiente (`curl_reset` + reuso; até 50 handles no `CurlMultiHandler`).
-  Nenhuma dessas otimizações se aplica ao Omegaalfa, que não usa cURL.
-- **DNS:** conexões reutilizadas não resolvem; novas conexões usam `getaddrinfo` (cache do
-  SO). Não há cache de DNS dedicado na biblioteca — irrelevante em localhost/IP, moderado
-  para hosts reais sem keep-alive.
+O benchmark usa HTTP em localhost. Ele não mede handshake TLS, DNS remoto, perda de
+pacotes ou limites de um servidor real. O consumo reportado é o pico acumulado do
+processo e não uma medida de memória isolada por cliente.
 
-### 3.2 CPU / processamento
+## 4. Correções incluídas nesta revisão
 
-- **Hotspot primário:** o polling descrito acima (cada iteração: syscall `stream_select` +
-  `Fiber::suspend`/`resume` + cálculo de deadlines com `hrtime`).
-- **Parsing de headers** (`SocketTransport::parseStatus()` `:842`, `Headers::fromRaw()`
-  `src/Http/Headers.php:39`): `preg_match` por status line e `preg_split` com regex de 3
-  ramos por bloco de headers, em **toda** resposta — caminho quente.
-- **`writePayload()`** (`SocketTransport.php:513`): chunking duplo (`substr` de 8KB no
-  payload e de novo no chunk) — overhead extra em uploads de corpo grande.
-- **Clones de `Headers` por requisição:** `request()` clona os headers de opções e faz
-  `merge()`; `prepareRequest()` (`SocketTransport.php:151`) clona de novo — até 3 cópias
-  do mapa de headers por request.
-- **`Set-Cookie` parseado duas vezes** por resposta (uma em `extractCookies()`, outra em
-  `CookieJar::storeFromHeaders()`).
-- Overhead estrutural de Fiber/Future por requisição (~3 objetos + 1 Fiber) — baixo e
-  amortizado; o custo real está nas retomadas por iteração de polling, não na criação.
+- O event loop padrão aguarda readiness de leitura/escrita e acorda todos os Fibers
+  correspondentes no mesmo ciclo. O fallback de polling continua disponível para loops
+  injetados que não implementem SocketReadinessInterface.
+- Conexões HTTPS usam TCP não bloqueante e handshake TLS cooperativo com o event loop.
+  O caminho foi validado por testes HTTPS locais, inclusive via proxy CONNECT.
+- Headers HTTP têm limites de 64 KiB e 100 linhas; linhas SSE têm limite de 64 KiB.
+- Redirects resolvem referências relativas, limpam a query separada da requisição original
+  e preservam HEAD. Formulários aceitam parâmetros no media type; métodos POST/PUT/PATCH
+  sem conteúdo enviam Content-Length: 0.
+- Clientes derivados isolam o CookieJar; timeouts inválidos são rejeitados. O parser SSE
+  descarta eventos incompletos no EOF e não despacha blocos sem campo data.
+- O CI executa lint PHP em arquivos, PHPStan e CS Fixer; o Composer declara ext-openssl.
 
-### 3.3 Alocação de memória
+## 5. Limitações e recomendações para próximas medições
 
-- **Pico estável de 8 MB** em todos os cenários — sem vazamentos e com folga para lotes de
-  25 × 100KB. O upload multipart já usa buffer `php://temp` com spill em disco (não
-  materializa arquivos grandes).
-- Cópias evitáveis por requisição de download: `substr($body, 0, $contentLength)` de
-  recorte (`readResponse`), cópia do `ChunkedDecoder` (apenas em chunked) e `gzdecode`
-  (apenas com `Content-Encoding: gzip`).
-- `Response::headers()` devolve `clone` a cada chamada — quem acessar headers em loop paga
-  uma cópia por acesso (não exercitado no benchmark).
-- `gc_collect_cycles()` no benchmark é uma única chamada pós-warmup; o GC cíclico do PHP
-  opera por contagem de raízes (1.000) e não apareceu como gargalo nos números.
+- A resolução DNS do PHP ainda pode bloquear antes do connect TCP.
+- A verificação local de sufixos públicos rejeita sufixos de um rótulo e alguns registries
+  comuns, mas não implementa a Public Suffix List completa. Não trate essa lista curta como
+  política suficiente para ambientes multi-tenant.
+- O fallback de polling permanece para event loops customizados sem SocketReadinessInterface;
+  o event loop padrão do cliente usa readiness.
+- Para conclusões de performance, rode o benchmark pelo menos três vezes em uma máquina
+  ociosa e compare medianas. O script não mede TLS ou DNS e não deve ser usado como previsão
+  direta de latência em produção.
 
-## 4. Recomendações de Otimização
-
-### 1. [ALTO] Espera de I/O orientada a eventos (elimina o polling)
-
-**Impacto estimado:** +15–30% de throughput em cenários concorrentes (batch); reduz CPU ociosa.
-
-**Antes** (`SocketTransport::waitForSocket`, `src/Http/SocketTransport.php:747`):
-
-```php
-while (true) {
-    $this->ensureTotalTimeout($totalDeadlineNs);
-    if (hrtime(true) >= $deadlineNs) {
-        throw new TimeoutException($message);
-    }
-
-    $readStreams = $read ? [$socket] : [];
-    $writeStreams = $write ? [$socket] : [];
-    $ready = @stream_select($readStreams, $writeStreams, $except, 0, 0); // syscall por iteração
-
-    if ($ready > 0) {
-        return;
-    }
-
-    $this->loop->next(); // retoma imediatamente — 1 syscall + 1 Fiber switch por volta
-}
-```
-
-**Depois** (registrando o socket no event loop, zero polling):
-
-```php
-private function waitForSocket($socket, bool $read, bool $write, float $timeoutSeconds, string $message, int $totalDeadlineNs): void
-{
-    $deadlineNs = hrtime(true) + (int)($timeoutSeconds * 1_000_000_000);
-    $result = null;
-
-    $watcher = $read
-        ? $this->loop->onReadable($socket, function () use (&$result): void { $result = 'ready'; })
-        : $this->loop->onWritable($socket, function () use (&$result): void { $result = 'ready'; });
-
-    try {
-        while ($result === null) {
-            $this->ensureTotalTimeout($totalDeadlineNs);
-            if (hrtime(true) >= $deadlineNs) {
-                throw new TimeoutException($message);
-            }
-            $this->loop->next(); // sem syscall: só retoma quando o watcher dispara
-        }
-    } finally {
-        $this->loop->cancel($watcher);
-    }
-}
-```
-
-> Nota: `FiberEventLoop` já expõe `onReadable()`/`onWritable()`/`cancel()` — a primitiva
-> existe; basta trocar o mecanismo de espera. O mesmo vale para
-> `StreamResponse::waitForReadable()` (`src/Http/StreamResponse.php:254`).
-
-### 2. [MÉDIO] Fast-path de parsing de headers e status line
-
-**Impacto estimado:** −3 a −6% de CPU por requisição.
-
-**Antes** (`Headers::fromRaw` + `parseStatus`):
-
-```php
-$lines = preg_split('/\r\n|\n|\r/', trim($rawHeaders)) ?: [];
-// ...
-$statusLine = strtok($headerBlock, "\r\n") ?: '';
-if (preg_match('/HTTP\/\d\.\d\s+(\d{3})/', $statusLine, $matches) !== 1) { ... }
-```
-
-**Depois** (o framing já garante CRLF; status ocupa as posições fixas 9–11):
-
-```php
-$lines = explode("\r\n", $rawHeaders);
-// ...
-$status = (int) substr($headerBlock, 9, 3); // "HTTP/1.1 200 OK"
-if ($status < 100 || $status > 599) {
-    throw new ConnectionException('Invalid HTTP response status line');
-}
-```
-
-### 3. [MÉDIO] Eliminar clones redundantes de `Headers` por requisição
-
-**Impacto estimado:** −2 a −4% de CPU/alocação por requisição.
-
-**Antes** (`AsyncHttpClient::request()` + `SocketTransport::prepareRequest()`):
-
-```php
-$request = new Request(..., Headers::from($this->options->headers)->merge($headers), ...);
-// ...
-$headers = Headers::from($request->headers); // terceira cópia do mapa
-```
-
-**Depois** (construir o cabeçalho de fio uma única vez; copiar só quando houver o que
-adicionar):
-
-```php
-$requestHeaders = $headers === []
-    ? Headers::from($this->options->headers)          // 1 cópia
-    : Headers::from($this->options->headers)->merge($headers);
-
-// em prepareRequest: mutar uma cópia só quando o request herdar headers de redirect
-```
-
-### 4. [MÉDIO] Escrita em camada única com blocos maiores (uploads)
-
-**Impacto estimado:** −10–20% de tempo de upload de corpos grandes (1MB+).
-
-**Antes** (`writePayload`, `src/Http/SocketTransport.php:513`):
-
-```php
-$chunk = substr($payload, $offset, 8192);       // fatia 8KB
-// ...
-$written = @fwrite($socket, substr($chunk, $chunkOffset, 8192)); // fatia de novo
-```
-
-**Depois** (uma fatia por escrita, blocos de 64KB):
-
-```php
-while ($offset < $payloadLength) {
-    // ...
-    $written = @fwrite($socket, substr($payload, $offset, 65536));
-    $offset += $written ?: 0;
-    // (mantendo a lógica de retry em $written === 0)
-}
-```
-
-### 5. [BAIXO] Passagem única de `Set-Cookie`
-
-**Impacto estimado:** −1–2% de CPU em APIs com múltiplos cookies.
-
-**Antes:** `extractCookies()` e `CookieJar::storeFromHeaders()` percorrem
-`Set-Cookie` separadamente.
-
-**Depois:** o `CookieJar` devolve os pares nome=valor extraídos durante o armazenamento e
-`sendWithRedirects` os reaproveita ao montar `Response`.
-
-### 6. [BAIXO] Estado de reuso do pool registrado na liberação
-
-**Impacto estimado:** elimina 2 syscalls por requisição reutilizada.
-
-**Antes:** `ConnectionPool::isReusable()` (`src/Http/ConnectionPool.php:115`) faz
-`feof()` + `stream_select` a cada `acquire()`.
-
-**Depois:** ao `release()`, já sabemos se o socket ficou limpo (consumimos exatamente
-`Content-Length`/framing); marcar o socket como "limpo" e verificar apenas sockets
-parados há mais de N segundos (ou pares que enviam dados espontâneos).
-
-### 7. [BAIXO] Configuração de produção para workers CLI
-
-**Impacto estimado:** +9–28% conforme medição do Run 3 (seção 2.3).
-
-Recomendação para execução em produção (não é mudança de código):
-
-```ini
-opcache.enable_cli=1
-opcache.jit=tracing
-opcache.jit_buffer_size=64M
-opcache.validate_timestamps=0
-xdebug.mode=off   ; ou não carregar o Xdebug em produção
-```
-
-### 8. [BAIXO] Cache de DNS estático (somente para hosts reais)
-
-**Impacto estimado:** eliminável apenas quando keep-alive está desabilitado e há muitos
-hosts distintos. Guardar `host => ip` com TTL curto (30–60s) no `ConnectionPool`.
-
-## 5. Próximos Passos
-
-Ordenado por **ganho de performance ÷ esforço**:
-
-1. **Espera orientada a eventos** (Recomendação 1) — maior ganho; usa primitivas já
-   existentes no `FiberEventLoop`; coberto pelos testes atuais de timeout/streaming.
-2. **Configuração de produção** (Recomendação 7) — ganho imediato e sem código; documentar
-   no README e usar `opcache`/`JIT` nos workers CLI e no CI de performance.
-3. **Fast-path de parsing** (Recomendação 2) — mudança pequena e mensurável; adicionar
-   teste de regressão de parsing (casos-limite de status line) junto.
-4. **Remoção de clones de `Headers`** (Recomendação 3) — cuidado com o caminho de redirect
-   (que clona para strip de credenciais); os 152 testes atuais dão rede de segurança.
-5. **Escrita em blocos de 64KB** (Recomendação 4) — relevante para uploads; validar com
-   cenário de payload grande em POST (o benchmark atual mede GET).
-6. **Passagem única de `Set-Cookie` + estado do pool** (Recomendações 5–6) — micro-ganhos,
-   fazer junto com outra mudança para amortizar revisão.
-7. **Cache de DNS** (Recomendação 8) — só se perfis de produção com muitos hosts sem
-   keep-alive justificarem; hoje não há evidência de ganho.
-
-**Sugestão de governança:** adicionar o `benchmark.php` como job de CI não-bloqueante
-(comparando contra os números-base deste relatório) e re-rodar este benchmark após cada
-otimização acima, sempre na configuração do Run 3 (Xdebug off + OPcache + JIT) — a única
-em que a comparação entre as bibliotecas é justa.
-
-## 6. Regressão de segurança e validação de performance (PHP sem JIT)
+## 6. Métricas de uma revisão anterior — histórico (PHP sem JIT)
 
 Após as correções de framing HTTP, isolamento de conexões TLS no pool, redirects,
 timeouts totais e headers, o benchmark foi executado com `php benchmark.php`
@@ -397,8 +192,8 @@ acumulado do processo e não deve ser interpretado como pico isolado por cliente
 
 Uso: `php benchmark.php [iterations] [batchSize] [warmup] [serverWorkers] [batchSamples]`.
 Execute ao menos três vezes e compare medianas. As tabelas anteriores foram
-produzidas pela metodologia antiga e não devem ser comparadas diretamente com
-resultados futuros deste script.
+produzidas por versões anteriores da metodologia, exceto a seção 8, que usa o script
+atual. Não compare diretamente as tabelas históricas 2.1–2.4 e 6 com a seção 8.
 
 ## 8. Correções de compatibilidade, segurança e TLS — comparação pontual
 
@@ -424,3 +219,34 @@ como a mudança não reescreveu o event loop ou o caminho comum de leitura, repi
 ao menos três vezes em máquina ociosa antes de atribuir essa diferença ao patch.
 O benchmark usa HTTP em localhost e não mede o handshake TLS; a mudança TLS foi
 validada pela integração HTTPS local. A resolução DNS permanece síncrona.
+
+## 9. Estado técnico e pendências após as correções
+
+### Aplicado
+
+- O `HttpClientEventLoop` registra sockets por recurso, espera readiness com
+  `stream_select` bloqueante quando não há trabalho pronto e retoma todos os Fibers
+  sinalizados no mesmo ciclo. O caminho padrão do cliente não faz polling cooperativo.
+- Para compatibilidade, um loop injetado que não implemente `SocketReadinessInterface`
+  ainda usa o fallback cooperativo de polling em `SocketTransport` e `StreamResponse`.
+- Conexões HTTPS são abertas como TCP não bloqueante; o handshake TLS aguarda leitura do
+  socket antes de tentar novamente. Os testes locais cobrem HTTPS direto e via CONNECT.
+- Respostas são rejeitadas acima de 64 KiB/100 linhas de headers; linhas SSE acima de
+  64 KiB também são rejeitadas. Eventos SSE sem terminador em branco no EOF são descartados.
+- Redirects resolvem referências relativas, não reaplicam `query` da requisição original
+  e preservam o método `HEAD`. Formulários aceitam parâmetros no media type e POST/PUT/PATCH
+  vazios enviam `Content-Length: 0`.
+- Clientes derivados isolam o `CookieJar`; timeouts de API precisam ser positivos e finitos.
+  `composer.json` declara `ext-openssl`, e o CI executa lint PHP real, PHPStan e CS Fixer.
+
+### Limitações restantes
+
+- A resolução DNS do PHP ainda pode bloquear antes da conexão TCP.
+- O `CookieJar` rejeita sufixos de rótulo único e uma lista curta de sufixos públicos comuns,
+  mas não traz a Public Suffix List completa. A aplicação deve isolar jars em contextos
+  multi-tenant e não deve interpretar essa lista como validação completa.
+- O fallback de polling permanece para event loops injetados sem `SocketReadinessInterface`;
+  o event loop padrão do cliente usa o caminho orientado a readiness.
+- Os números de performance são de uma rodada por estado e em HTTP local. Para decisões
+  de release baseadas em diferença pequena, rode pelo menos três vezes em máquina ociosa e
+  compare medianas; HTTPS não faz parte dos seis cenários do script.
