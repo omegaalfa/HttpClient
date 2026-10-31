@@ -32,7 +32,7 @@ if ($server === false) {
     exit(1);
 }
 
-while ($client = @stream_socket_accept($server, 1)) {
+while ($client = @stream_socket_accept($server, 300)) {
     stream_set_blocking($client, true);
     while (($crypto = @stream_socket_enable_crypto($client, true, STREAM_CRYPTO_METHOD_TLS_SERVER)) === 0) {
         usleep(10_000);

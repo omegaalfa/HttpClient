@@ -1,8 +1,8 @@
 # Relatório de Benchmark e Análise de Performance: HttpClient
 
-> **Ferramenta:** `php benchmark.php` — 6 cenários comparando **Omegaalfa HttpClient**
+> **Ferramenta:** `php benchmark.php` — 8 cenários comparando **Omegaalfa HttpClient**
 > (streams + Fibers + `FiberEventLoop`) vs **Guzzle 7** (extensão cURL via `curl_multi`).
-> Ambiente: PHP 8.5.4 (CLI), WSL2/Linux, servidor de teste `php -S` com
+> Ambiente: PHP 8.5.4 (CLI), WSL2/Linux, servidores locais de teste com
 > `PHP_CLI_SERVER_WORKERS=16` em `127.0.0.1`. Iterações: 500 (batch de 25, warmup 50).
 >
 > **Nota metodológica importante:** o `HttpClient` **não utiliza cURL** — o transporte é
@@ -17,16 +17,18 @@
 
 ## 1. Resumo Executivo — estado atual
 
-O benchmark mais recente foi executado em 31/10/2026 com PHP 8.5.4, OPcache CLI e JIT
-desativados. O cliente completou todos os cenários sem falhas, usando 8–10 MB de pico
-acumulado. No cenário concorrente com latência, mediu **767,62 req/s** e **P95 de lote
-32,8286 ms**. Comparado à execução-base anterior às correções, isso representa **+0,2%
-de RPS** e **−0,6% no P95**. Os seis resultados detalhados estão na seção 8.
+O benchmark compara seis cenários HTTP locais e acrescenta dois cenários TLS locais
+(handshake direto e HTTPS através de proxy CONNECT). Também verifica uma matriz
+representativa de comportamento HTTP. O cliente completou os seis cenários HTTP mais
+recentes sem falhas, usando 10 MB de pico acumulado. Na última rodada completa, o cenário
+concorrente com latência mediu **766,48 req/s** e **P95 de lote 32,9036 ms**. Comparado
+à execução-base anterior às correções, isso representa **+0,1%
+de RPS** e **−0,3% no P95**. Os seis resultados detalhados estão na seção 8.
 
 O código atual espera prontidão de sockets via `HttpClientEventLoop`, faz o connect TCP e
 handshake TLS sem bloquear a Fiber, limita headers HTTP/SSE e aplica as correções de
-redirect, formulário, timeout e isolamento de cookies descritas na seção 9. O benchmark
-local mede HTTP, não TLS, e cada coluna da comparação da seção 8 vem de uma execução;
+redirect, formulário, timeout e isolamento de cookies descritas na seção 9. Cada coluna
+de comparação da seção 8 vem de uma execução;
 variações pequenas não demonstram ganho nem regressão estatística.
 
 **Conclusão:** as alterações avaliadas mantiveram o desempenho do cenário batch + latência
@@ -111,15 +113,16 @@ Guzzle — a comparação justa entre as libs é a do run 3.
 
 ## 3. Leitura dos resultados atuais
 
-A seção 8 compara uma execução anterior às correções com uma execução do código final,
-com os mesmos parâmetros e sem JIT. O batch + latência ficou em 767,62 req/s (+0,2%)
-e P95 de lote 32,8286 ms (−0,6%). O batch pequeno ficou 4,6% abaixo em RPS e 4,8%
-acima no P95 nessa rodada. Como cada número representa uma única execução, não se deve
-atribuir essas diferenças ao código sem repetir o teste e comparar medianas.
+A tabela de seis cenários HTTP na seção 8 compara uma execução anterior às correções com
+uma execução do código final. Nesta rodada adicional, batch + latência ficou em 766,48
+req/s, com P95 de lote 32,9036 ms. Os dois novos cenários TLS também aparecem na seção 8.
+Como cada número representa uma única execução, não se deve atribuir diferenças pequenas
+ao código sem repetir o teste e comparar medianas.
 
-O benchmark usa HTTP em localhost. Ele não mede handshake TLS, DNS remoto, perda de
-pacotes ou limites de um servidor real. O consumo reportado é o pico acumulado do
-processo e não uma medida de memória isolada por cliente.
+O benchmark padrão usa servidores locais; mede TLS direto e através de CONNECT, mas não
+simula DNS remoto, perda de pacotes ou limites de um servidor real. O modo remoto opcional
+é configurável por ambiente e mede esses fatores de ponta a ponta, sem isolar DNS. O
+consumo reportado é o pico acumulado do processo e não uma medida de memória por cliente.
 
 ## 4. Correções incluídas nesta revisão
 
@@ -145,8 +148,9 @@ processo e não uma medida de memória isolada por cliente.
 - O fallback de polling permanece para event loops customizados sem SocketReadinessInterface;
   o event loop padrão do cliente usa readiness.
 - Para conclusões de performance, rode o benchmark pelo menos três vezes em uma máquina
-  ociosa e compare medianas. O script não mede TLS ou DNS e não deve ser usado como previsão
-  direta de latência em produção.
+  ociosa e compare medianas. TLS padrão usa loopback; para medir DNS e rede externa,
+  configure o modo remoto. Esses resultados dependem do ambiente e não são previsão direta
+  de latência em produção.
 
 ## 6. Métricas de uma revisão anterior — histórico (PHP sem JIT)
 
@@ -197,6 +201,13 @@ atual. Não compare diretamente as tabelas históricas 2.1–2.4 e 6 com a seç�
 
 ## 8. Correções de compatibilidade, segurança e TLS — comparação pontual
 
+O benchmark padrão reporta oito medições de performance: os seis cenários HTTP abaixo,
+mais **TLS direto local** e **TLS via proxy CONNECT** (cada requisição estabelece uma
+conexão nova). O resumo do processo inclui as oito e falha se qualquer uma tiver erros.
+Separadamente, a matriz verifica redirect relativo, HEAD sem corpo, 204, framing chunked,
+form com charset e persistência de `Set-Cookie`; esses são checks funcionais, não métricas
+de throughput.
+
 Executado em 31/10/2026 com `php benchmark.php`, PHP 8.5.4, OPcache CLI desligado,
 JIT desativado, 500 iterações, 100 amostras de batch, 16 workers e 50 warmups.
 “Antes” foi medido antes das correções desta revisão; “Depois” após elas, com os
@@ -213,12 +224,37 @@ regressão de fumaça de performance, não como conclusão estatística.
 | Endpoint lento 150 ms | 6.61 | 6.61 | 0.0% | 151.4587 | 151.4378 | 0.0% |
 | Batch + latência | 765.75 | 767.62 | +0.2% | 33.0180 | 32.8286 | −0.6% |
 
-Todas as respostas foram bem-sucedidas e o pico acumulado do processo permaneceu
-entre 8 e 10 MB. O caminho serial pequeno variou mais que os outros cenários;
+Todas as respostas dos oito cenários de performance foram bem-sucedidas e o pico acumulado
+do processo foi 10 MB. O caminho serial pequeno variou mais que os outros cenários;
 como a mudança não reescreveu o event loop ou o caminho comum de leitura, repita
 ao menos três vezes em máquina ociosa antes de atribuir essa diferença ao patch.
-O benchmark usa HTTP em localhost e não mede o handshake TLS; a mudança TLS foi
-validada pela integração HTTPS local. A resolução DNS permanece síncrona.
+Os seis cenários HTTP acima vêm da comparação anterior. Na execução desta atualização
+(PHP 8.5.4, sem OPcache CLI/JIT, 500 iterações e 100 amostras batch), os cenários TLS
+foram executados com 25 requests por cliente, conexão nova por request e certificado
+local autoassinado. Os tempos incluem handshake e, no segundo caso, proxy CONNECT.
+
+| Cenário TLS local | Cliente | RPS | Latência P95 |
+|---|---|---:|---:|
+| TLS direto | HttpClient | 473.58 | 2.2352 ms |
+| TLS direto | Guzzle | 431.18 | 2.5217 ms |
+| TLS via CONNECT | HttpClient | 380.35 | 2.7910 ms |
+| TLS via CONNECT | Guzzle | 311.44 | 3.2113 ms |
+
+Todas as requisições TLS desta rodada tiveram sucesso. A amostra de 25 é adequada como
+verificação e referência local, mas é pequena para conclusões robustas; repita antes de
+publicar comparações de desempenho. A resolução DNS permanece síncrona.
+
+### Endpoint remoto opcional
+
+Para incluir uma medição real de ponta a ponta, configure `HTTPCLIENT_BENCHMARK_URL` com
+uma URL HTTP(S). Opcionalmente use `HTTPCLIENT_BENCHMARK_PROXY` para HTTP proxy ou HTTPS
+CONNECT, `HTTPCLIENT_BENCHMARK_REMOTE_REQUESTS` para o total de requests por cliente e
+`HTTPCLIENT_BENCHMARK_REMOTE_CONCURRENCY` para o tamanho do lote. O script reporta modos
+serial e batch separadamente. Essa execução engloba DNS, conexão, TLS (quando HTTPS),
+proxy e servidor remoto; a consulta DNS diagnóstica é separada e pode estar em cache, logo
+não isola nem representa o tempo real do resolver. Por padrão não se acessa a rede externa,
+para manter as medições repetíveis. Os seis checks da matriz são representativos, não uma
+validação exaustiva de todas as extensões e casos-limite dos protocolos.
 
 ## 9. Estado técnico e pendências após as correções
 
@@ -247,6 +283,7 @@ validada pela integração HTTPS local. A resolução DNS permanece síncrona.
   multi-tenant e não deve interpretar essa lista como validação completa.
 - O fallback de polling permanece para event loops injetados sem `SocketReadinessInterface`;
   o event loop padrão do cliente usa o caminho orientado a readiness.
-- Os números de performance são de uma rodada por estado e em HTTP local. Para decisões
-  de release baseadas em diferença pequena, rode pelo menos três vezes em máquina ociosa e
-  compare medianas; HTTPS não faz parte dos seis cenários do script.
+- Os números de performance são de uma rodada por estado. Para decisões de release
+  baseadas em diferença pequena, rode pelo menos três vezes em máquina ociosa e compare
+  medianas; DNS remoto e proxies reais dependem do ambiente e só são medidos quando
+  configurados por variáveis de ambiente.
