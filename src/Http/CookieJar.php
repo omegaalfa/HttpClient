@@ -6,6 +6,15 @@ namespace Omegaalfa\HttpClient\Http;
 
 final class CookieJar
 {
+    private const COMMON_PUBLIC_SUFFIXES = [
+        'ac.uk', 'co.uk', 'gov.uk', 'ltd.uk', 'me.uk', 'net.uk', 'org.uk', 'plc.uk',
+        'com.au', 'edu.au', 'gov.au', 'net.au', 'org.au',
+        'ac.nz', 'co.nz', 'govt.nz', 'net.nz', 'org.nz',
+        'ac.jp', 'co.jp', 'go.jp', 'ne.jp', 'or.jp',
+        'com.br', 'edu.br', 'gov.br', 'net.br', 'org.br',
+        'com.cn', 'net.cn', 'org.cn', 'gov.cn',
+    ];
+
     /**
      * @var array<string, array<string, array<string, array{value: string, expires: ?int, secure: bool, httpOnly: bool, hostOnly: bool}>>>
      */
@@ -104,6 +113,10 @@ final class CookieJar
                 continue;
             }
 
+            if ($hasDomainAttribute && self::isPublicSuffixOrIp($domain)) {
+                continue;
+            }
+
             if ($maxAge !== null) {
                 $now = time();
                 $expires = $maxAge <= 0
@@ -182,6 +195,25 @@ final class CookieJar
     private static function domainMatches(string $host, string $domain): bool
     {
         return $host === $domain || str_ends_with($host, '.' . $domain);
+    }
+
+    /**
+     * Avoid accepting obvious public-suffix Domain attributes without adding
+     * a runtime dependency. This deliberately covers single-label suffixes
+     * and common country-code registries; it is not a complete PSL database.
+     */
+    private static function isPublicSuffixOrIp(string $domain): bool
+    {
+        if (filter_var($domain, FILTER_VALIDATE_IP) !== false) {
+            return true;
+        }
+
+        $labels = explode('.', rtrim($domain, '.'));
+        if (count($labels) < 2) {
+            return true;
+        }
+
+        return in_array(strtolower($domain), self::COMMON_PUBLIC_SUFFIXES, true);
     }
 
     private static function pathMatches(string $requestPath, string $cookiePath): bool

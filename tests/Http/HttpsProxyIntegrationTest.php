@@ -46,4 +46,16 @@ final class HttpsProxyIntegrationTest extends TestCase
         self::assertSame('GET', $data['method']);
         self::assertSame('/secure', $data['path']);
     }
+
+    public function testDirectHttpsRequestCompletesNonBlockingTlsHandshake(): void
+    {
+        $client = (new AsyncHttpClient())
+            ->withVerifySSL(false)
+            ->withFollowRedirects(false);
+
+        $response = await($client->get(self::$httpsServer->baseUrl() . '/direct'));
+
+        self::assertSame(200, $response->status());
+        self::assertSame('/direct', $response->json()['path']);
+    }
 }

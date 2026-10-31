@@ -48,7 +48,7 @@ final class SseEvent
         try {
             return json_decode($this->data, $assoc, 512, JSON_THROW_ON_ERROR);
         } catch (JsonException $exception) {
-            $preview = mb_substr($this->data, 0, 200);
+            $preview = function_exists('mb_substr') ? mb_substr($this->data, 0, 200) : substr($this->data, 0, 200);
             throw new RuntimeException('Invalid SSE JSON payload: ' . $preview, 0, $exception);
         }
     }

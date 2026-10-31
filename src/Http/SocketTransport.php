@@ -14,6 +14,9 @@ use Omegaalfa\HttpClient\Http\Exceptions\TimeoutException;
  */
 final class SocketTransport implements TransportInterface
 {
+    private const MAX_RESPONSE_HEADER_BYTES = 65_536;
+
+    private const MAX_RESPONSE_HEADER_LINES = 100;
     private FiberEventLoop $loop;
 
     private ConnectionPool $connectionPool;
@@ -163,9 +166,16 @@ final class SocketTransport implements TransportInterface
         }
 
         $parsed = parse_url($url);
+        if ($parsed === false || !isset($parsed['host'])) {
+            throw new ConnectionException('Invalid request URL', $request);
+        }
+        $scheme = strtolower((string)($parsed['scheme'] ?? 'http'));
+        if (!in_array($scheme, ['http', 'https'], true)) {
+            throw new ConnectionException('Unsupported URL scheme: ' . $scheme, $request);
+        }
         $host = $parsed['host'] ?? '';
         $path = $parsed['path'] ?? '/';
-        $isSecure = strtolower($parsed['scheme'] ?? 'http') === 'https';
+        $isSecure = $scheme === 'https';
         $requestTarget = $path . (isset($parsed['query']) ? '?' . $parsed['query'] : '');
         if ($options->proxy !== null && !$isSecure) {
             $requestTarget = $url;
@@ -223,7 +233,13 @@ final class SocketTransport implements TransportInterface
             $headers->set('Content-Type', $built['content_type']);
             $headers->set('Content-Length', (string)$built['content_length']);
         } elseif (is_array($request->body)) {
-            if (($headers->get('Content-Type') ?? '') === 'application/x-www-form-urlencoded') {
+            $contentType = strtolower(trim((string)($headers->get('Content-Type') ?? '')));
+            $mediaTypeEnd = strpos($contentType, ';');
+            if ($mediaTypeEnd !== false) {
+                $contentType = trim(substr($contentType, 0, $mediaTypeEnd));
+            }
+            $isFormEncoded = $contentType === 'application/x-www-form-urlencoded';
+            if ($isFormEncoded) {
                 $body = http_build_query($request->body);
             } else {
                 $body = json_encode($request->body, JSON_THROW_ON_ERROR);
@@ -245,6 +261,10 @@ final class SocketTransport implements TransportInterface
 
         if (is_string($body) && $body !== '') {
             $headers->set('Content-Length', (string)strlen($body));
+        } elseif (in_array(strtoupper($request->method), ['POST', 'PUT', 'PATCH'], true)
+            && !$headers->has('Content-Length')
+            && !$headers->has('Transfer-Encoding')) {
+            $headers->set('Content-Length', '0');
         }
 
         return [
@@ -342,8 +362,8 @@ final class SocketTransport implements TransportInterface
             $connectScheme = 'http';
         }
 
-        $transport = $connectScheme === 'https' ? 'tls' : 'tcp';
-        $pooled = $this->connectionPool->acquire($transport, $connectHost, $connectPort, $poolKey);
+        $poolTransport = $connectScheme === 'https' ? 'tls' : 'tcp';
+        $pooled = $this->connectionPool->acquire($poolTransport, $connectHost, $connectPort, $poolKey);
         if (is_resource($pooled)) {
             stream_set_blocking($pooled, false);
             stream_set_read_buffer($pooled, 0);
@@ -364,13 +384,13 @@ final class SocketTransport implements TransportInterface
         }
 
         $context = stream_context_create($contextOptions);
-        $flags = $connectScheme === 'https'
-            ? STREAM_CLIENT_CONNECT
-            : STREAM_CLIENT_ASYNC_CONNECT | STREAM_CLIENT_CONNECT;
-        $timeout = $connectScheme === 'https' ? $options->connectTimeout : 0;
+        $flags = STREAM_CLIENT_ASYNC_CONNECT | STREAM_CLIENT_CONNECT;
+        $timeout = 0;
+        $deadlineNs = $totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
+        $connectDeadlineNs = hrtime(true) + (int)($options->connectTimeout * 1_000_000_000);
 
         $socket = @stream_socket_client(
-            "{$transport}://{$connectHost}:{$connectPort}",
+            "tcp://{$connectHost}:{$connectPort}",
             $errno,
             $errstr,
             $timeout,
@@ -386,15 +406,18 @@ final class SocketTransport implements TransportInterface
         stream_set_read_buffer($socket, 0);
         stream_set_write_buffer($socket, 0);
 
-        $deadlineNs = $totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
-        if ($connectScheme !== 'https') {
-            $this->waitForSocket($socket, false, true, $options->connectTimeout, 'Connection timed out', $deadlineNs);
-            $this->assertSocketConnected($socket);
+        $remainingConnectSeconds = max(0.0, ($connectDeadlineNs - hrtime(true)) / 1_000_000_000);
+        $this->waitForSocket($socket, false, true, $remainingConnectSeconds, 'Connection timed out', $deadlineNs);
+        $this->assertSocketConnected($socket);
+
+        if ($proxy === null && $scheme === 'https') {
+            $this->enableTlsOverSocket($socket, $host, $options, min($connectDeadlineNs, $deadlineNs), $deadlineNs);
         }
 
         if ($proxy !== null && $scheme === 'https') {
-            $this->establishConnectTunnel($socket, $host, $port, $options, $deadlineNs);
-            $this->enableTlsOverSocket($socket, $host, $options, $deadlineNs);
+            $connectionDeadlineNs = min($connectDeadlineNs, $deadlineNs);
+            $this->establishConnectTunnel($socket, $host, $port, $options, $connectionDeadlineNs);
+            $this->enableTlsOverSocket($socket, $host, $options, $connectionDeadlineNs, $deadlineNs);
         }
 
         return $socket;
@@ -501,7 +524,7 @@ final class SocketTransport implements TransportInterface
     /**
      * @param resource $socket
      */
-    private function enableTlsOverSocket($socket, string $host, RequestOptions $options, int $deadlineNs): void
+    private function enableTlsOverSocket($socket, string $host, RequestOptions $options, int $connectDeadlineNs, int $totalDeadlineNs): void
     {
         stream_context_set_option($socket, 'ssl', 'verify_peer', $options->verifySsl);
         stream_context_set_option($socket, 'ssl', 'verify_peer_name', $options->verifySsl);
@@ -510,7 +533,11 @@ final class SocketTransport implements TransportInterface
         stream_context_set_option($socket, 'ssl', 'SNI_enabled', true);
 
         while (true) {
-            $this->ensureTotalTimeout($deadlineNs);
+            $this->ensureTotalTimeout($totalDeadlineNs);
+            if (hrtime(true) >= $connectDeadlineNs) {
+                throw new TimeoutException('TLS handshake timed out');
+            }
+
             $result = @stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT);
 
             if ($result === true) {
@@ -518,10 +545,11 @@ final class SocketTransport implements TransportInterface
             }
 
             if ($result === false) {
-                throw new ConnectionException('Failed to establish TLS tunnel through proxy');
+                throw new ConnectionException('Failed to establish TLS connection');
             }
 
-            $this->loop->next();
+            $remainingSeconds = max(0.0, ($connectDeadlineNs - hrtime(true)) / 1_000_000_000);
+            $this->waitForSocket($socket, true, false, $remainingSeconds, 'TLS handshake timed out', $totalDeadlineNs);
         }
     }
 
@@ -695,7 +723,13 @@ final class SocketTransport implements TransportInterface
 
         while (true) {
             while (($position = strpos($headerBuffer, "\r\n\r\n")) !== false) {
+                if ($position > self::MAX_RESPONSE_HEADER_BYTES) {
+                    throw new ConnectionException('HTTP response headers exceed the configured size limit');
+                }
                 $rawHeaders = substr($headerBuffer, 0, $position);
+                if (substr_count($rawHeaders, "\r\n") + 1 > self::MAX_RESPONSE_HEADER_LINES) {
+                    throw new ConnectionException('HTTP response headers exceed the configured line limit');
+                }
                 $headerBuffer = substr($headerBuffer, $position + 4);
                 try {
                     $headers = Headers::fromRaw($rawHeaders);
@@ -746,6 +780,10 @@ final class SocketTransport implements TransportInterface
 
             $readDeadline = hrtime(true) + (int)($options->readTimeout * 1_000_000_000);
             $headerBuffer .= $chunk;
+            if (strlen($headerBuffer) > self::MAX_RESPONSE_HEADER_BYTES
+                && strpos($headerBuffer, "\r\n\r\n") === false) {
+                throw new ConnectionException('HTTP response headers exceed the configured size limit');
+            }
         }
 
         throw new ConnectionException('Invalid HTTP response: headers not found');
@@ -834,8 +872,19 @@ final class SocketTransport implements TransportInterface
 
         $redirected = $request->withUrl($location);
 
-        if (in_array($status, [301, 302, 303], true) && $request->method !== 'GET') {
+        if (in_array($status, [301, 302, 303], true) && !in_array(strtoupper($request->method), ['GET', 'HEAD'], true)) {
             $redirected = new Request('GET', $location, Headers::from($request->headers), null, [], [], null, $options);
+        } else {
+            $redirected = new Request(
+                $redirected->method,
+                $redirected->url,
+                $redirected->headers,
+                $redirected->body,
+                [],
+                $redirected->files,
+                $redirected->multipart,
+                $redirected->options
+            );
         }
 
         if ($this->sameOrigin($currentUrl, $location)) {
@@ -1013,27 +1062,102 @@ final class SocketTransport implements TransportInterface
 
     private function resolveRedirectUrl(string $baseUrl, string $location): string
     {
-        if (preg_match('#^https?://#i', $location) === 1) {
+        $reference = parse_url($location);
+        if ($reference === false) {
             return $location;
         }
-
         $base = parse_url($baseUrl);
         if ($base === false || !isset($base['scheme'], $base['host'])) {
             return $location;
         }
 
-        $prefix = $base['scheme'] . '://' . $base['host'];
+        if (isset($reference['scheme'])) {
+            return $location;
+        }
+
+        $target = [
+            'scheme' => $base['scheme'],
+            'host' => $base['host'],
+        ];
         if (isset($base['port'])) {
-            $prefix .= ':' . $base['port'];
+            $target['port'] = $base['port'];
         }
 
-        if (str_starts_with($location, '/')) {
-            return $prefix . $location;
+        if (isset($reference['host'])) {
+            $target['host'] = $reference['host'];
+            if (isset($reference['port'])) {
+                $target['port'] = $reference['port'];
+            } else {
+                unset($target['port']);
+            }
+            $target['path'] = $this->removeDotSegments($reference['path'] ?? '');
+            if (array_key_exists('query', $reference)) {
+                $target['query'] = $reference['query'];
+            }
+        } else {
+            $referencePath = $reference['path'] ?? '';
+            if ($referencePath === '') {
+                $target['path'] = $base['path'] ?? '/';
+                if (array_key_exists('query', $reference)) {
+                    $target['query'] = $reference['query'];
+                } elseif (array_key_exists('query', $base)) {
+                    $target['query'] = $base['query'];
+                }
+            } else {
+                if (str_starts_with($referencePath, '/')) {
+                    $mergedPath = $referencePath;
+                } else {
+                    $basePath = $base['path'] ?? '/';
+                    $lastSlash = strrpos($basePath, '/');
+                    $mergedPath = ($lastSlash === false ? '' : substr($basePath, 0, $lastSlash + 1)) . $referencePath;
+                }
+                $target['path'] = $this->removeDotSegments($mergedPath);
+                if (array_key_exists('query', $reference)) {
+                    $target['query'] = $reference['query'];
+                }
+            }
         }
 
-        $path = $base['path'] ?? '/';
-        $directory = rtrim(str_replace('\\', '/', dirname($path)), '/');
-        return $prefix . ($directory === '' ? '' : $directory) . '/' . $location;
+        if (array_key_exists('fragment', $reference)) {
+            $target['fragment'] = $reference['fragment'];
+        }
+
+        $url = $target['scheme'] . '://' . $target['host'];
+        if (isset($target['port'])) {
+            $url .= ':' . $target['port'];
+        }
+        $url .= $target['path'];
+        if (array_key_exists('query', $target)) {
+            $url .= '?' . $target['query'];
+        }
+        if (array_key_exists('fragment', $target)) {
+            $url .= '#' . $target['fragment'];
+        }
+        return $url;
+    }
+
+    private function removeDotSegments(string $path): string
+    {
+        $segments = explode('/', $path);
+        $normalized = [];
+        foreach ($segments as $segment) {
+            if ($segment === '.' || strtolower($segment) === '%2e') {
+                continue;
+            }
+            if (in_array(strtolower($segment), ['..', '.%2e', '%2e.', '%2e%2e'], true)) {
+                if ($normalized !== [] && end($normalized) !== '') {
+                    array_pop($normalized);
+                }
+                continue;
+            }
+            $normalized[] = $segment;
+        }
+
+        $result = implode('/', $normalized);
+        if ($result === '' && str_starts_with($path, '/')) {
+            return '/';
+        }
+        return $result;
     }
 
 }

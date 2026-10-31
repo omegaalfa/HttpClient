@@ -19,7 +19,7 @@ jobs:
         with:
           php-version: "8.4"
           coverage: pcov
-          extensions: sockets
+          extensions: sockets, openssl
           tools: composer:v2
 
       - name: Cache Composer packages
@@ -112,7 +112,7 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           coverage: xdebug
-          extensions: sockets
+          extensions: sockets, openssl
           tools: composer:v2
 
       - name: 🔍 Check PHP version

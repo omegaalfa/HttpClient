@@ -10,6 +10,12 @@
 > de conexões. Toda menção a cURL nesta análise refere-se ao baseline Guzzle do benchmark
 > (que usa `CurlFactory`/`curl_multi`) e às oportunidades de configuração desse lado.
 
+> **Atualização em 31/10/2026:** as seções 1–6 preservam análises e medições
+> históricas. Recomendações antigas sobre polling e limitações de headers/SSE
+> foram parcialmente superadas; consulte as seções 7–8 para a metodologia atual e
+> a comparação mais recente. Resultados de execuções isoladas são indicativos, não
+> uma garantia de ganho ou regressão.
+
 ## 1. Resumo Executivo
 
 Em três execuções completas (44s, 44s e 43s de duração total), o Omegaalfa HttpClient
@@ -393,3 +399,28 @@ Uso: `php benchmark.php [iterations] [batchSize] [warmup] [serverWorkers] [batch
 Execute ao menos três vezes e compare medianas. As tabelas anteriores foram
 produzidas pela metodologia antiga e não devem ser comparadas diretamente com
 resultados futuros deste script.
+
+## 8. Correções de compatibilidade, segurança e TLS — comparação pontual
+
+Executado em 31/10/2026 com `php benchmark.php`, PHP 8.5.4, OPcache CLI desligado,
+JIT desativado, 500 iterações, 100 amostras de batch, 16 workers e 50 warmups.
+“Antes” foi medido antes das correções desta revisão; “Depois” após elas, com os
+mesmos parâmetros. Cada coluna vem de uma única execução. Os tempos seriais e os
+percentis de batch são sensíveis à carga local, então esta tabela serve como
+regressão de fumaça de performance, não como conclusão estatística.
+
+| Cenário | Antes RPS | Depois RPS | Δ RPS | Antes P95 (ms) | Depois P95 (ms) | Δ P95 |
+|---|---:|---:|---:|---:|---:|---:|
+| Serial pequeno | 1,532.01 | 1,484.47 | −3.1% | 0.7195 | 0.7645 | +6.3% |
+| Batch pequeno | 1,953.03 | 1,863.27 | −4.6% | 15.0849 | 15.8142 | +4.8% |
+| Latência 10 ms | 91.90 | 91.76 | −0.2% | 11.0189 | 11.0182 | 0.0% |
+| Payload 100 KB | 1,183.89 | 1,222.87 | +3.3% | 0.9999 | 0.9057 | −9.4% |
+| Endpoint lento 150 ms | 6.61 | 6.61 | 0.0% | 151.4587 | 151.4378 | 0.0% |
+| Batch + latência | 765.75 | 767.62 | +0.2% | 33.0180 | 32.8286 | −0.6% |
+
+Todas as respostas foram bem-sucedidas e o pico acumulado do processo permaneceu
+entre 8 e 10 MB. O caminho serial pequeno variou mais que os outros cenários;
+como a mudança não reescreveu o event loop ou o caminho comum de leitura, repita
+ao menos três vezes em máquina ociosa antes de atribuir essa diferença ao patch.
+O benchmark usa HTTP em localhost e não mede o handshake TLS; a mudança TLS foi
+validada pela integração HTTPS local. A resolução DNS permanece síncrona.

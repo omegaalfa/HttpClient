@@ -140,6 +140,18 @@ final class RequestOptionsTest extends TestCase
         self::assertSame(5.5, $options->totalTimeout);
     }
 
+    public function testTimeoutBuildersRejectZeroAndNonFiniteValues(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        (new RequestOptions())->withTotalTimeout(INF);
+    }
+
+    public function testTimeoutBuildersRejectZero(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        (new RequestOptions())->withConnectTimeout(0.0);
+    }
+
     public function testRedirectSecurityOptionsAreImmutable(): void
     {
         $base = new RequestOptions();

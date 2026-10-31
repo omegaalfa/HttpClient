@@ -120,6 +120,21 @@ final class AsyncHttpClientInternalTest extends TestCase
         self::assertSame('https://api.example.com/via-base', $transport->lastRequest()?->url);
     }
 
+    public function testDerivedClientGetsAnIndependentCookieJar(): void
+    {
+        $base = new AsyncHttpClient();
+        $derived = $base->withHeader('X-Tenant', 'tenant-b');
+        $optionsProperty = new \ReflectionProperty(AsyncHttpClient::class, 'options');
+        $baseOptions = $optionsProperty->getValue($base);
+        $derivedOptions = $optionsProperty->getValue($derived);
+
+        self::assertNotSame($baseOptions->cookieJar, $derivedOptions->cookieJar);
+
+        $baseOptions->cookieJar->set('session', 'tenant-a', 'api.example.com');
+        self::assertSame('session=tenant-a', $baseOptions->cookieJar->headerFor('api.example.com'));
+        self::assertNull($derivedOptions->cookieJar->headerFor('api.example.com'));
+    }
+
     private function invokePrivate(object $object, string $method, mixed ...$args): mixed
     {
         $reflection = new ReflectionClass($object);

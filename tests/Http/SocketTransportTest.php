@@ -38,6 +38,10 @@ final class SocketTransportTest extends TestCase
 
         $relative = $this->invokePrivate($transport, 'resolveRedirectUrl', 'https://a.com/base/path', 'next');
         self::assertSame('https://a.com/base/next', $relative);
+
+        self::assertSame('https://a.com/base/path?page=2', $this->invokePrivate($transport, 'resolveRedirectUrl', 'https://a.com/base/path?old=1', '?page=2'));
+        self::assertSame('https://a.com/base/next', $this->invokePrivate($transport, 'resolveRedirectUrl', 'https://a.com/base/', 'next'));
+        self::assertSame('https://b.com/x', $this->invokePrivate($transport, 'resolveRedirectUrl', 'https://a.com/base', '//b.com/a/../x'));
     }
 
     public function testBuildRedirectedRequestStripsCredentialsOnCrossOrigin(): void
@@ -111,6 +115,27 @@ final class SocketTransportTest extends TestCase
         self::assertSame('Bearer manual', $redirected->headers->get('Authorization'));
         self::assertSame('sid=1', $redirected->headers->get('Cookie'));
         self::assertSame('secret', $redirected->options?->bearerToken);
+    }
+
+    public function testRedirectDoesNotReplayOriginalQueryAndKeepsHeadMethod(): void
+    {
+        $transport = new SocketTransport(new FiberEventLoop());
+        $options = new RequestOptions();
+        $head = new Request('HEAD', 'https://api.example.com/dir/file', new Headers(), null, ['token' => 'old'], [], null, $options);
+
+        $redirected = $this->invokePrivate(
+            $transport,
+            'buildRedirectedRequest',
+            $head,
+            $options,
+            'https://api.example.com/dir/file?token=old',
+            'https://api.example.com/final?sig=new',
+            302
+        );
+
+        self::assertSame('HEAD', $redirected->method);
+        self::assertSame([], $redirected->query);
+        self::assertSame('https://api.example.com/final?sig=new', $redirected->url);
     }
 
     public function testBuildRedirectedRequestStripsCredentialsWhenOnlyPortChanges(): void
@@ -224,6 +249,50 @@ final class SocketTransportTest extends TestCase
         $prepared = $this->invokePrivate($transport, 'prepareRequest', $request, $options);
 
         self::assertSame('grant_type=client_credentials&scope=read', $prepared['body']);
+    }
+
+    public function testPrepareRequestRecognizesFormMediaTypeWithCharsetAndAddsEmptyBodyLength(): void
+    {
+        $options = new RequestOptions();
+        $request = new Request(
+            'POST',
+            'http://example.com/token',
+            new Headers(['Content-Type' => 'application/x-www-form-urlencoded; charset=UTF-8']),
+            ['scope' => 'read write'],
+            [],
+            [],
+            null,
+            $options
+        );
+        $transport = new SocketTransport(new FiberEventLoop());
+        $prepared = $this->invokePrivate($transport, 'prepareRequest', $request, $options);
+
+        self::assertSame('scope=read+write', $prepared['body']);
+        self::assertSame('application/x-www-form-urlencoded; charset=UTF-8', $prepared['headers']->get('Content-Type'));
+        self::assertNull($prepared['headers']->get('Accept'));
+
+        $empty = new Request('POST', 'http://example.com/token', new Headers(), null, [], [], null, $options);
+        $emptyPrepared = $this->invokePrivate($transport, 'prepareRequest', $empty, $options);
+        self::assertSame('0', $emptyPrepared['headers']->get('Content-Length'));
+    }
+
+    public function testReadResponseHeadRejectsHeadersOverConfiguredLimit(): void
+    {
+        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        self::assertNotFalse($sockets);
+        [$readSocket, $writeSocket] = $sockets;
+
+        fwrite($writeSocket, "HTTP/1.1 200 OK\r\nX-Large: " . str_repeat('a', 65_540));
+        $transport = new SocketTransport(new FiberEventLoop());
+
+        try {
+            $this->expectException(ConnectionException::class);
+            $this->expectExceptionMessage('HTTP response headers exceed the configured size limit');
+            $this->invokePrivate($transport, 'readResponseHead', $readSocket, new RequestOptions());
+        } finally {
+            fclose($readSocket);
+            fclose($writeSocket);
+        }
     }
 
     public function testPrepareRequestBuildsMultipartBodyFromFilesAndFields(): void

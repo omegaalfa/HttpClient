@@ -5,10 +5,11 @@ declare(strict_types=1);
 namespace Omegaalfa\HttpClient\Http;
 
 use Omegaalfa\HttpClient\Http\SseEvent;
-use RuntimeException;
 
 final class SseParser
 {
+    private const MAX_LINE_BYTES = 65_536;
+
     private string $buffer = '';
 
     /**
@@ -32,7 +33,14 @@ final class SseParser
         while (true) {
             $lineEnd = strpos($this->buffer, "\n");
             if ($lineEnd === false) {
+                if (strlen($this->buffer) > self::MAX_LINE_BYTES) {
+                    throw new \RuntimeException('SSE line exceeds the configured size limit');
+                }
                 break;
+            }
+
+            if ($lineEnd > self::MAX_LINE_BYTES) {
+                throw new \RuntimeException('SSE line exceeds the configured size limit');
             }
 
             $line = substr($this->buffer, 0, $lineEnd);
@@ -62,8 +70,8 @@ final class SseParser
             match ($field) {
                 'data' => $this->current['data'][] = $value,
                 'event' => $this->current['event'] = $value,
-                'id' => $this->current['id'] = $value,
-                'retry' => $this->current['retry'] = is_numeric($value) ? (int) $value : null,
+                'id' => $this->current['id'] = $this->parseId($value),
+                'retry' => $this->current['retry'] = $this->parseRetry($value),
                 default => null,
             };
         }
@@ -76,16 +84,18 @@ final class SseParser
      */
     public function finish(): array
     {
-        if ($this->buffer !== '' || $this->current['data'] !== [] || $this->current['event'] !== null || $this->current['id'] !== null || $this->current['retry'] !== null) {
-            throw new RuntimeException('SSE stream ended before a complete event was received');
-        }
-
+        // The SSE format dispatches only events terminated by a blank line.
+        // Discard an unfinished trailing line/event at EOF.
+        $this->buffer = '';
+        $this->current['data'] = [];
+        $this->current['event'] = null;
         return [];
     }
 
     private function dispatchCurrentEvent(): ?SseEvent
     {
-        if ($this->current['data'] === [] && $this->current['event'] === null && $this->current['id'] === null && $this->current['retry'] === null) {
+        if ($this->current['data'] === []) {
+            $this->current['event'] = null;
             return null;
         }
 
@@ -100,10 +110,20 @@ final class SseParser
         $this->current = [
             'data' => [],
             'event' => null,
-            'id' => null,
-            'retry' => null,
+            'id' => $this->current['id'],
+            'retry' => $this->current['retry'],
         ];
 
         return $event;
+    }
+
+    private function parseId(string $value): ?string
+    {
+        return str_contains($value, "\0") ? $this->current['id'] : $value;
+    }
+
+    private function parseRetry(string $value): ?int
+    {
+        return ctype_digit($value) ? (int) $value : $this->current['retry'];
     }
 }

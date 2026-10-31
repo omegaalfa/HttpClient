@@ -416,6 +416,12 @@ final class AsyncHttpClient
 
     private function withOptions(RequestOptions $options): self
     {
+        // Derived clients get an independent cookie store unless a builder
+        // already supplied a cloned jar (withCookie/withCookies).
+        if ($options->cookieJar === $this->options->cookieJar) {
+            $options->cookieJar = clone $options->cookieJar;
+        }
+
         return new self($this->loop, $options, $this->connectionPool, $this->transport);
     }
 

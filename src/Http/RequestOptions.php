@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Omegaalfa\HttpClient\Http;
 
+use InvalidArgumentException;
+
 final class RequestOptions
 {
     /** @param array{0: string, 1: string}|null $basicAuth */
@@ -33,6 +35,10 @@ final class RequestOptions
         /** Absolute monotonic deadline shared by retries and redirects. */
         public ?int $totalDeadlineNs = null
     ) {
+        self::assertValidTimeout($connectTimeout, 'connectTimeout');
+        self::assertValidTimeout($readTimeout, 'readTimeout');
+        self::assertValidTimeout($writeTimeout, 'writeTimeout');
+        self::assertValidTimeout($totalTimeout, 'totalTimeout');
         $this->headers = $headers ?? new Headers();
         $this->cookieJar = $cookieJar ?? new CookieJar();
     }
@@ -171,6 +177,7 @@ final class RequestOptions
 
     public function withTimeout(float $seconds): self
     {
+        self::assertValidTimeout($seconds, 'timeout');
         $clone = clone $this;
         $clone->totalTimeout = $seconds;
         return $clone;
@@ -178,6 +185,7 @@ final class RequestOptions
 
     public function withConnectTimeout(float $seconds): self
     {
+        self::assertValidTimeout($seconds, 'connectTimeout');
         $clone = clone $this;
         $clone->connectTimeout = $seconds;
         return $clone;
@@ -185,6 +193,7 @@ final class RequestOptions
 
     public function withReadTimeout(float $seconds): self
     {
+        self::assertValidTimeout($seconds, 'readTimeout');
         $clone = clone $this;
         $clone->readTimeout = $seconds;
         return $clone;
@@ -192,6 +201,7 @@ final class RequestOptions
 
     public function withWriteTimeout(float $seconds): self
     {
+        self::assertValidTimeout($seconds, 'writeTimeout');
         $clone = clone $this;
         $clone->writeTimeout = $seconds;
         return $clone;
@@ -199,6 +209,7 @@ final class RequestOptions
 
     public function withTotalTimeout(float $seconds): self
     {
+        self::assertValidTimeout($seconds, 'totalTimeout');
         $clone = clone $this;
         $clone->totalTimeout = $seconds;
         return $clone;
@@ -225,5 +236,12 @@ final class RequestOptions
         $clone = clone $this;
         $clone->totalDeadlineNs = $deadlineNs;
         return $clone;
+    }
+
+    private static function assertValidTimeout(float $seconds, string $name): void
+    {
+        if (!is_finite($seconds) || $seconds <= 0.0) {
+            throw new InvalidArgumentException(sprintf('%s must be a finite number greater than zero', $name));
+        }
     }
 }

@@ -107,6 +107,18 @@ final class CookieJarTest extends TestCase
         self::assertSame([], $jar->all());
     }
 
+    public function testStoreFromHeadersRejectsSingleLabelAndCommonPublicSuffixDomains(): void
+    {
+        $jar = new CookieJar();
+        $comCookie = new Headers(['Set-Cookie' => 'root=leak; Domain=com; Path=/']);
+        $ukCookie = new Headers(['Set-Cookie' => 'uk=leak; Domain=co.uk; Path=/']);
+        $jar->storeFromHeaders($comCookie, 'api.example.com');
+        $jar->storeFromHeaders($ukCookie, 'api.example.co.uk');
+
+        self::assertNull($jar->headerFor('example.com', '/', false));
+        self::assertNull($jar->headerFor('bank.co.uk', '/', false));
+    }
+
     public function testStoreFromHeadersAcceptsParentDomain(): void
     {
         $headers = new Headers();

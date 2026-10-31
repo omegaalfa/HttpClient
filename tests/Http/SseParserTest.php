@@ -33,15 +33,34 @@ final class SseParserTest extends TestCase
         self::assertSame('[DONE]', $events[0]->data());
     }
 
-    public function testFinishThrowsOnPrematureEnd(): void
+    public function testFinishDiscardsAnIncompleteTrailingEvent(): void
     {
         $parser = new SseParser();
         $parser->push("data: partial");
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('SSE stream ended before a complete event was received');
+        self::assertSame([], $parser->finish());
+    }
 
-        $parser->finish();
+    public function testIdOnlyBlockDoesNotDispatchAndIdPersistsAcrossEvents(): void
+    {
+        $parser = new SseParser();
+
+        self::assertSame([], $parser->push("id: cursor-1\n\n"));
+        $events = $parser->push("data: first\n\n");
+        self::assertCount(1, $events);
+        self::assertSame('cursor-1', $events[0]->id());
+
+        $next = $parser->push("data: second\n\n");
+        self::assertCount(1, $next);
+        self::assertSame('cursor-1', $next[0]->id());
+    }
+
+    public function testRejectsAnOversizedUnterminatedLine(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('SSE line exceeds the configured size limit');
+
+        (new SseParser())->push(str_repeat('x', 65_537));
     }
 
     public function testJsonDecodingReportsContextOnFailure(): void

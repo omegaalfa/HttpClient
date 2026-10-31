@@ -919,12 +919,16 @@ try {
 ## Comportamentos importantes
 
 - Body em array vira JSON por padrão, mesmo com `withJson(false)`; essa opção controla a inclusão automática dos headers JSON.
-- Para enviar `application/x-www-form-urlencoded`, defina o header explicitamente.
-- Cookies recebidos por `Set-Cookie` são persistidos no `CookieJar` e filtrados por domínio (com boundary de ponto), path, expiração e flag `Secure`; o atributo `Domain` precisa ser parent do host de origem.
-- Redirects 301, 302 e 303 podem converter o método para GET; ao mudar de origem, credenciais são removidas.
+- Para enviar `application/x-www-form-urlencoded`, defina o header explicitamente; parâmetros como `charset=UTF-8` são aceitos.
+- Clientes derivados com `with*()` recebem uma cópia independente do `CookieJar`; cookies recebidos por cada cliente são filtrados por domínio, path, expiração e flag `Secure`.
+- Cookies com `Domain` igual a um sufixo público comum (por exemplo `com` ou `co.uk`) são rejeitados. A validação é uma proteção parcial, não uma implementação completa da Public Suffix List.
+- Redirects 301, 302 e 303 convertem métodos diferentes de GET/HEAD para GET; parâmetros passados separadamente em `query` não são reaplicados ao destino. Ao mudar de origem, credenciais são removidas.
+- Respostas com mais de 64 KiB de headers ou mais de 100 linhas são rejeitadas. Linhas SSE são limitadas a 64 KiB; eventos SSE incompletos no EOF são descartados conforme o protocolo.
 - `withRetries(N)` configura até `N` novas tentativas além da chamada inicial.
+- Os timeouts devem ser números finitos maiores que zero; zero, `INF` e `NAN` lançam `InvalidArgumentException`.
 - Retries por timeout, falha de conexão ou resposta 5xx ocorrem apenas para métodos idempotentes: GET, HEAD, OPTIONS, PUT e DELETE. POST e PATCH não são repetidos automaticamente.
 - `withProxy()` suporta HTTP direto e CONNECT para HTTPS.
+- O TCP e o handshake TLS usam streams não bloqueantes; o event loop suspende a Fiber até a prontidão do socket.
 - O keep-alive é desabilitado por padrão; use `withKeepAlive(true)` para habilitar o pool.
 - Conexões recusadas/inacessíveis são reportadas como `Connection failed: ...`, não como falha de escrita.
 
@@ -943,7 +947,8 @@ try {
   cada redirect na camada da aplicação.
 
 - O pool é básico e ainda não possui TTL, health-check ativo ou métricas por origem.
-- O `CookieJar` distingue cookies host-only e cookies com atributo `Domain`, mas não valida a Public Suffix List. Não compartilhe o jar entre domínios não confiáveis; cookies `Domain` de sufixos públicos não são rejeitados por uma lista local. Cookies manuais sem domínio ficam associados ao primeiro host que os utiliza.
+- O handshake TLS é multiplexado depois que o nome do servidor é resolvido; a consulta DNS em si não é assíncrona e pode bloquear durante uma consulta lenta.
+- A verificação de sufixos públicos do `CookieJar` cobre sufixos de um rótulo e um conjunto comum de registries de país, mas não substitui uma Public Suffix List atualizada. Em ambientes multi-tenant que exigem cobertura completa, use armazenamento de cookies isolado e aplique política de domínio na aplicação. Cookies manuais sem domínio ficam associados ao primeiro host que os utiliza.
 - O corpo puro em stream (arquivo sem multipart) não é suportado; uploads multipart usam buffer com spill em disco.
 - Não há HTTP/2, HTTP/3 ou WebSocket nativos ainda.
 
