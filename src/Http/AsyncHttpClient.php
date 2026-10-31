@@ -427,15 +427,126 @@ final class AsyncHttpClient
 
     private function resolveUrl(string $url): string
     {
-        if (preg_match('#^https?://#i', $url) === 1) {
-            return $url;
-        }
-
         if ($this->options->baseUrl === null) {
             return $url;
         }
 
-        return rtrim($this->options->baseUrl, '/') . '/' . ltrim($url, '/');
+        if (preg_match('#^[a-z][a-z0-9+.-]*:#i', $url) === 1) {
+            return $url;
+        }
+
+        $reference = parse_url($url);
+        if ($reference === false) {
+            return $url;
+        }
+
+        $base = parse_url($this->options->baseUrl);
+        if ($base === false || !isset($base['scheme'], $base['host'])) {
+            throw new \InvalidArgumentException('baseUrl must be an absolute URI with a scheme and host');
+        }
+
+        $scheme = (string) $base['scheme'];
+        $authorityParts = $base;
+
+        if (isset($reference['host'])) {
+            $authorityParts = $reference;
+            $path = self::removeDotSegments((string) ($reference['path'] ?? ''));
+            $query = $reference['query'] ?? null;
+        } else {
+            $basePath = (string) ($base['path'] ?? '');
+            $referencePath = (string) ($reference['path'] ?? '');
+
+            if ($referencePath === '') {
+                $path = $basePath;
+                $query = array_key_exists('query', $reference)
+                    ? $reference['query']
+                    : ($base['query'] ?? null);
+            } else {
+                $path = self::removeDotSegments(
+                    str_starts_with($referencePath, '/')
+                        ? $referencePath
+                        : self::mergeUriPaths($basePath, $referencePath)
+                );
+                $query = $reference['query'] ?? null;
+            }
+        }
+
+        $resolved = $scheme . '://' . self::uriAuthority($authorityParts) . $path;
+        if ($query !== null) {
+            $resolved .= '?' . $query;
+        }
+        if (array_key_exists('fragment', $reference)) {
+            $resolved .= '#' . $reference['fragment'];
+        }
+
+        return $resolved;
+    }
+
+    /** @param array<string, mixed> $parts */
+    private static function uriAuthority(array $parts): string
+    {
+        $authority = '';
+        if (isset($parts['user'])) {
+            $authority .= $parts['user'];
+            if (isset($parts['pass'])) {
+                $authority .= ':' . $parts['pass'];
+            }
+            $authority .= '@';
+        }
+
+        $authority .= (string) $parts['host'];
+        if (isset($parts['port'])) {
+            $authority .= ':' . $parts['port'];
+        }
+
+        return $authority;
+    }
+
+    private static function mergeUriPaths(string $basePath, string $referencePath): string
+    {
+        if ($basePath === '') {
+            return '/' . $referencePath;
+        }
+
+        $lastSlash = strrpos($basePath, '/');
+        return ($lastSlash === false ? '' : substr($basePath, 0, $lastSlash + 1)) . $referencePath;
+    }
+
+    private static function removeDotSegments(string $path): string
+    {
+        $input = $path;
+        $output = '';
+
+        while ($input !== '') {
+            if (str_starts_with($input, '../')) {
+                $input = substr($input, 3);
+            } elseif (str_starts_with($input, './')) {
+                $input = substr($input, 2);
+            } elseif (str_starts_with($input, '/./')) {
+                $input = substr($input, 2);
+            } elseif ($input === '/.') {
+                $input = '/';
+            } elseif (str_starts_with($input, '/../')) {
+                $input = substr($input, 3);
+                $output = preg_replace('~/[^/]*$~', '', $output) ?? $output;
+            } elseif ($input === '/..') {
+                $input = '/';
+                $output = preg_replace('~/[^/]*$~', '', $output) ?? $output;
+            } elseif ($input === '.' || $input === '..') {
+                $input = '';
+            } else {
+                $nextSlash = strpos($input, '/', $input[0] === '/' ? 1 : 0);
+                if ($nextSlash === false) {
+                    $output .= $input;
+                    $input = '';
+                } else {
+                    $output .= substr($input, 0, $nextSlash);
+                    $input = substr($input, $nextSlash);
+                }
+            }
+        }
+
+        return $output;
     }
 
     private function sendStreamWithRetries(Request $request): StreamResponse

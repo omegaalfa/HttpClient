@@ -762,7 +762,10 @@ Cada método devolve um novo `AsyncHttpClient`, permitindo encadear opções sem
 alterar a configuração do objeto original. Tempos são informados em segundos;
 delay de retry é informado em milissegundos.
 
-- `withBaseUrl($url)`: prefixo para URLs relativas.
+- `withBaseUrl($url)`: URI base para resolver referências conforme RFC 3986. Caminhos
+  iniciados por `/` são relativos à raiz do host; use `withBaseUrl('https://api.example/v1/')`
+  com `get('users')` para manter o caminho `/v1/`. Referências como `../users`, `?page=2`
+  e `#section` seguem as regras de resolução URI.
 - `withHeader($name, $value)` / `withHeaders($headers)`: headers padrão; headers
   da chamada podem substituir os padrões com o mesmo nome.
 - `withCookie($name, $value, $domain = '', $path = '/')` /
@@ -921,7 +924,7 @@ try {
 - Body em array vira JSON por padrão, mesmo com `withJson(false)`; essa opção controla a inclusão automática dos headers JSON.
 - Para enviar `application/x-www-form-urlencoded`, defina o header explicitamente; parâmetros como `charset=UTF-8` são aceitos.
 - Clientes derivados com `with*()` recebem uma cópia independente do `CookieJar`; cookies recebidos por cada cliente são filtrados por domínio, path, expiração e flag `Secure`.
-- Cookies com `Domain` igual a um sufixo público comum (por exemplo `com` ou `co.uk`) são rejeitados. A validação é uma proteção parcial, não uma implementação completa da Public Suffix List.
+- Cookies com `Domain` igual a qualquer sufixo da Public Suffix List são rejeitados, incluindo regras privadas (por exemplo `github.io`) e curingas. A lista distribuída é atualizada a partir de `publicsuffix.org`; veja `resources/public_suffix_list.dat` para a versão incluída.
 - Redirects 301, 302 e 303 convertem métodos diferentes de GET/HEAD para GET; parâmetros passados separadamente em `query` não são reaplicados ao destino. Ao mudar de origem, credenciais são removidas.
 - Respostas com mais de 64 KiB de headers ou mais de 100 linhas são rejeitadas. Linhas SSE são limitadas a 64 KiB; eventos SSE incompletos no EOF são descartados conforme o protocolo.
 - `withRetries(N)` configura até `N` novas tentativas além da chamada inicial.
@@ -948,7 +951,7 @@ try {
 
 - O pool é básico e ainda não possui TTL, health-check ativo ou métricas por origem.
 - O handshake TLS é multiplexado depois que o nome do servidor é resolvido; a consulta DNS em si não é assíncrona e pode bloquear durante uma consulta lenta.
-- A verificação de sufixos públicos do `CookieJar` cobre sufixos de um rótulo e um conjunto comum de registries de país, mas não substitui uma Public Suffix List atualizada. Em ambientes multi-tenant que exigem cobertura completa, use armazenamento de cookies isolado e aplique política de domínio na aplicação. Cookies manuais sem domínio ficam associados ao primeiro host que os utiliza.
+- A lista de sufixos públicos é um snapshot distribuído com a biblioteca e não se atualiza sozinha. Atualize `resources/public_suffix_list.dat` em releases periódicos; em ambientes multi-tenant, também isole os cookie jars. Cookies manuais sem domínio ficam associados ao primeiro host que os utiliza.
 - O corpo puro em stream (arquivo sem multipart) não é suportado; uploads multipart usam buffer com spill em disco.
 - Não há HTTP/2, HTTP/3 ou WebSocket nativos ainda.
 
@@ -957,6 +960,9 @@ try {
 ```bash
 composer test
 ```
+
+O arquivo `resources/public_suffix_list.dat` é publicado sob a Mozilla Public License 2.0;
+consulte o cabeçalho do arquivo e https://mozilla.org/MPL/2.0/.
 
 Para testar código consumidor sem rede, injete `Testing\MockTransport` no
 `AsyncHttpClient` (ver seção 25).

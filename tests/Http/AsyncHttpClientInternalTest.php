@@ -24,12 +24,54 @@ final class AsyncHttpClientInternalTest extends TestCase
         self::assertSame('https://api.example.com/users', $resolved);
     }
 
-    public function testResolveUrlUsesBaseUrlForRelativePath(): void
+    public function testResolveUrlFollowsRfc3986ForAbsolutePathReference(): void
     {
         $client = (new AsyncHttpClient())->withBaseUrl('https://api.example.com/v1');
 
         $resolved = $this->invokePrivate($client, 'resolveUrl', '/users');
-        self::assertSame('https://api.example.com/v1/users', $resolved);
+        self::assertSame('https://api.example.com/users', $resolved);
+    }
+
+    public function testResolveUrlMergesRelativePathAndRemovesDotSegments(): void
+    {
+        $client = (new AsyncHttpClient())->withBaseUrl('http://a/b/c/d;p?q');
+
+        self::assertSame(
+            'http://a/b/c/g',
+            $this->invokePrivate($client, 'resolveUrl', 'g')
+        );
+        self::assertSame(
+            'http://a/b/g',
+            $this->invokePrivate($client, 'resolveUrl', '../g')
+        );
+        self::assertSame(
+            'http://a/b/c/d;p?y',
+            $this->invokePrivate($client, 'resolveUrl', '?y')
+        );
+        self::assertSame(
+            'http://a/b/c/d;p?q#s',
+            $this->invokePrivate($client, 'resolveUrl', '#s')
+        );
+    }
+
+    public function testResolveUrlPreservesTrailingBasePathSlash(): void
+    {
+        $client = (new AsyncHttpClient())->withBaseUrl('https://api.example.com/v1/');
+
+        self::assertSame(
+            'https://api.example.com/v1/users',
+            $this->invokePrivate($client, 'resolveUrl', 'users')
+        );
+    }
+
+    public function testResolveUrlSupportsNetworkPathReferences(): void
+    {
+        $client = (new AsyncHttpClient())->withBaseUrl('https://api.example.com/v1/resource');
+
+        self::assertSame(
+            'https://cdn.example.net/assets/app.js',
+            $this->invokePrivate($client, 'resolveUrl', '//cdn.example.net/assets/./app.js')
+        );
     }
 
     public function testRetriesIdempotentRequestsOnServerErrors(): void

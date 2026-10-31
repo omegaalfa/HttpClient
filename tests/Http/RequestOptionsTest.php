@@ -54,13 +54,13 @@ final class RequestOptionsTest extends TestCase
         self::assertFalse($disabled->compression);
     }
 
-    public function testWithBaseUrlTrimsTrailingSlash(): void
+    public function testWithBaseUrlPreservesTrailingSlashForUriResolution(): void
     {
         $base = new RequestOptions();
         $changed = $base->withBaseUrl('https://api.example.com/');
 
         self::assertNull($base->baseUrl);
-        self::assertSame('https://api.example.com', $changed->baseUrl);
+        self::assertSame('https://api.example.com/', $changed->baseUrl);
     }
 
     public function testWithCookieAndWithCookiesCloneCookieJar(): void

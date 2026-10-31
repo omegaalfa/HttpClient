@@ -119,6 +119,30 @@ final class CookieJarTest extends TestCase
         self::assertNull($jar->headerFor('bank.co.uk', '/', false));
     }
 
+    public function testStoreFromHeadersRejectsPrivateAndWildcardPublicSuffixes(): void
+    {
+        $jar = new CookieJar();
+        $privateSuffixCookie = new Headers(['Set-Cookie' => 'session=leak; Domain=github.io; Path=/']);
+        $wildcardSuffixCookie = new Headers(['Set-Cookie' => 'session=leak; Domain=foo.ck; Path=/']);
+
+        $jar->storeFromHeaders($privateSuffixCookie, 'tenant.github.io');
+        $jar->storeFromHeaders($wildcardSuffixCookie, 'shop.foo.ck');
+
+        self::assertSame([], $jar->all());
+        self::assertNull($jar->headerFor('other.github.io', '/', false));
+        self::assertNull($jar->headerFor('other.foo.ck', '/', false));
+    }
+
+    public function testStoreFromHeadersAcceptsDomainBelowPrivatePublicSuffix(): void
+    {
+        $headers = new Headers(['Set-Cookie' => 'session=ok; Domain=tenant.github.io; Path=/']);
+        $jar = new CookieJar();
+        $jar->storeFromHeaders($headers, 'api.tenant.github.io');
+
+        self::assertSame('session=ok', $jar->headerFor('tenant.github.io', '/', false));
+        self::assertNull($jar->headerFor('other.github.io', '/', false));
+    }
+
     public function testStoreFromHeadersAcceptsParentDomain(): void
     {
         $headers = new Headers();

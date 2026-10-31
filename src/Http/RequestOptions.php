@@ -50,7 +50,7 @@ final class RequestOptions
     public function withBaseUrl(string $baseUrl): self
     {
         $clone = clone $this;
-        $clone->baseUrl = rtrim($baseUrl, '/');
+        $clone->baseUrl = $baseUrl;
         return $clone;
     }
 

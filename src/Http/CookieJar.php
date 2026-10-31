@@ -4,16 +4,14 @@ declare(strict_types=1);
 
 namespace Omegaalfa\HttpClient\Http;
 
+use Pdp\Domain;
+use Pdp\Rules;
+
 final class CookieJar
 {
-    private const COMMON_PUBLIC_SUFFIXES = [
-        'ac.uk', 'co.uk', 'gov.uk', 'ltd.uk', 'me.uk', 'net.uk', 'org.uk', 'plc.uk',
-        'com.au', 'edu.au', 'gov.au', 'net.au', 'org.au',
-        'ac.nz', 'co.nz', 'govt.nz', 'net.nz', 'org.nz',
-        'ac.jp', 'co.jp', 'go.jp', 'ne.jp', 'or.jp',
-        'com.br', 'edu.br', 'gov.br', 'net.br', 'org.br',
-        'com.cn', 'net.cn', 'org.cn', 'gov.cn',
-    ];
+    private const PUBLIC_SUFFIX_LIST_PATH = __DIR__ . '/../../resources/public_suffix_list.dat';
+
+    private static ?Rules $publicSuffixRules = null;
 
     /**
      * @var array<string, array<string, array<string, array{value: string, expires: ?int, secure: bool, httpOnly: bool, hostOnly: bool}>>>
@@ -197,23 +195,35 @@ final class CookieJar
         return $host === $domain || str_ends_with($host, '.' . $domain);
     }
 
-    /**
-     * Avoid accepting obvious public-suffix Domain attributes without adding
-     * a runtime dependency. This deliberately covers single-label suffixes
-     * and common country-code registries; it is not a complete PSL database.
-     */
+    /** Reject IP domains and Domain attributes that are public suffixes. */
     private static function isPublicSuffixOrIp(string $domain): bool
     {
         if (filter_var($domain, FILTER_VALIDATE_IP) !== false) {
             return true;
         }
 
-        $labels = explode('.', rtrim($domain, '.'));
-        if (count($labels) < 2) {
+        $domain = strtolower(rtrim($domain, '.'));
+        if ($domain === '' || count(explode('.', $domain)) < 2) {
             return true;
         }
 
-        return in_array(strtolower($domain), self::COMMON_PUBLIC_SUFFIXES, true);
+        try {
+            // Resolve a child name: resolving the suffix itself is treated as
+            // an unregistrable/unknown domain by the parser.
+            $suffix = self::publicSuffixRules()
+                ->resolve(Domain::fromIDNA2008('psl-check.' . $domain))
+                ->suffix();
+
+            return $suffix->isPublicSuffix() && strtolower($suffix->toString()) === $domain;
+        } catch (\Throwable) {
+            // Fail closed when a Domain attribute cannot be checked safely.
+            return true;
+        }
+    }
+
+    private static function publicSuffixRules(): Rules
+    {
+        return self::$publicSuffixRules ??= Rules::fromPath(self::PUBLIC_SUFFIX_LIST_PATH);
     }
 
     private static function pathMatches(string $requestPath, string $cookiePath): bool

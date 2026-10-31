@@ -24,7 +24,8 @@
     "php": ">=8.4",
     "ext-sockets": "*",
     "ext-openssl": "*",
-    "omegaalfa/fiber-event-loop": "^1.0"
+    "omegaalfa/fiber-event-loop": "^1.0",
+    "jeremykendall/php-domain-parser": "^6.4.0"
   },
   "autoload": {
     "files": [

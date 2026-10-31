@@ -11,19 +11,17 @@
 > (que usa `CurlFactory`/`curl_multi`) e às oportunidades de configuração desse lado.
 
 > **Atualização em 31/10/2026:** as seções 2.1–2.4 e 6 preservam métricas históricas.
-> As seções 1, 3–5 e 7–9 descrevem o código, as correções e a metodologia atuais;
-> a seção 8 contém a comparação mais recente. Resultados de execuções isoladas são indicativos, não
+> As seções 1, 3–5 e 7–10 descrevem o código, as correções e a metodologia atuais;
+> a seção 8 preserva a comparação antes/depois. Resultados de execuções isoladas são indicativos, não
 > uma garantia de ganho ou regressão.
 
 ## 1. Resumo Executivo — estado atual
 
 O benchmark compara seis cenários HTTP locais e acrescenta dois cenários TLS locais
 (handshake direto e HTTPS através de proxy CONNECT). Também verifica uma matriz
-representativa de comportamento HTTP. O cliente completou os seis cenários HTTP mais
-recentes sem falhas, usando 10 MB de pico acumulado. Na última rodada completa, o cenário
-concorrente com latência mediu **766,48 req/s** e **P95 de lote 32,9036 ms**. Comparado
-à execução-base anterior às correções, isso representa **+0,1%
-de RPS** e **−0,3% no P95**. Os seis resultados detalhados estão na seção 8.
+representativa de comportamento HTTP. O cliente completou os cenários sem falhas, usando
+10 MB de pico acumulado. A seção 10 registra a rodada posterior à integração da Public
+Suffix List e do resolvedor RFC 3986; a seção 8 preserva a comparação histórica.
 
 O código atual espera prontidão de sockets via `HttpClientEventLoop`, faz o connect TCP e
 handshake TLS sem bloquear a Fiber, limita headers HTTP/SSE e aplica as correções de
@@ -31,10 +29,9 @@ redirect, formulário, timeout e isolamento de cookies descritas na seção 9. C
 de comparação da seção 8 vem de uma execução;
 variações pequenas não demonstram ganho nem regressão estatística.
 
-**Conclusão:** as alterações avaliadas mantiveram o desempenho do cenário batch + latência
-e não mudaram a arquitetura do caminho comum de I/O HTTP. DNS continua sendo resolvido
-sistemicamente e pode bloquear; a proteção de cookies cobre sufixos públicos comuns, mas
-não substitui uma Public Suffix List completa.
+**Conclusão:** o caminho comum sem `baseUrl` continua retornando sem parse adicional; a PSL
+é carregada sob demanda apenas quando é necessário validar um atributo de domínio de cookie.
+DNS continua sendo resolvido sistemicamente e pode bloquear.
 
 ## 2. Métricas Coletadas (`php benchmark.php`)
 
@@ -142,9 +139,8 @@ consumo reportado é o pico acumulado do processo e não uma medida de memória 
 ## 5. Limitações e recomendações para próximas medições
 
 - A resolução DNS do PHP ainda pode bloquear antes do connect TCP.
-- A verificação local de sufixos públicos rejeita sufixos de um rótulo e alguns registries
-  comuns, mas não implementa a Public Suffix List completa. Não trate essa lista curta como
-  política suficiente para ambientes multi-tenant.
+- A Public Suffix List estática precisa ser atualizada em releases; a lista não é baixada
+  durante as requisições. Em ambientes multi-tenant, também isole os cookie jars.
 - O fallback de polling permanece para event loops customizados sem SocketReadinessInterface;
   o event loop padrão do cliente usa readiness.
 - Para conclusões de performance, rode o benchmark pelo menos três vezes em uma máquina
@@ -272,18 +268,42 @@ validação exaustiva de todas as extensões e casos-limite dos protocolos.
 - Redirects resolvem referências relativas, não reaplicam `query` da requisição original
   e preservam o método `HEAD`. Formulários aceitam parâmetros no media type e POST/PUT/PATCH
   vazios enviam `Content-Length: 0`.
+- Cookies recebidos com `Domain` são validados contra a Public Suffix List distribuída,
+  incluindo regras privadas e curingas. `withBaseUrl()` resolve referências conforme RFC 3986.
 - Clientes derivados isolam o `CookieJar`; timeouts de API precisam ser positivos e finitos.
   `composer.json` declara `ext-openssl`, e o CI executa lint PHP real, PHPStan e CS Fixer.
 
 ### Limitações restantes
 
 - A resolução DNS do PHP ainda pode bloquear antes da conexão TCP.
-- O `CookieJar` rejeita sufixos de rótulo único e uma lista curta de sufixos públicos comuns,
-  mas não traz a Public Suffix List completa. A aplicação deve isolar jars em contextos
-  multi-tenant e não deve interpretar essa lista como validação completa.
+- A Public Suffix List distribuída é um snapshot e não se atualiza sozinha; atualize o arquivo
+  em releases periódicos. Aplicações multi-tenant também devem isolar seus cookie jars.
 - O fallback de polling permanece para event loops injetados sem `SocketReadinessInterface`;
   o event loop padrão do cliente usa o caminho orientado a readiness.
 - Os números de performance são de uma rodada por estado. Para decisões de release
   baseadas em diferença pequena, rode pelo menos três vezes em máquina ociosa e compare
   medianas; DNS remoto e proxies reais dependem do ambiente e só são medidos quando
   configurados por variáveis de ambiente.
+
+## 10. Verificação de performance após PSL e resolução RFC 3986
+
+Executado com `php benchmark.php` em PHP 8.5.4, sem OPcache CLI ou JIT, 500 iterações,
+100 lotes e 50 warmups. Todas as respostas dos oito cenários foram bem-sucedidas; o pico
+acumulado reportado foi 10 MB. Esta rodada é uma checagem após as alterações, não uma
+comparação controlada antes/depois: os resultados podem variar com a carga local.
+
+| Cenário | HttpClient RPS | HttpClient P95 |
+|---|---:|---:|
+| Serial pequeno | 1,460.52 | 0.7690 ms |
+| Batch pequeno | 1,941.89 | 14.6116 ms por lote |
+| Latência 10 ms | 91.71 | 11.0926 ms |
+| Payload 100 KB | 1,222.69 | 0.9725 ms |
+| Endpoint lento 150 ms | 6.61 | 151.4904 ms |
+| Batch + latência | 767.66 | 32.9323 ms por lote |
+| TLS direto local | 461.36 | 2.4054 ms |
+| TLS via CONNECT | 364.23 | 3.2265 ms |
+
+O resolvedor retorna imediatamente quando não há `baseUrl`; parsing de URI só ocorre
+quando essa opção está configurada. A PSL é carregada sob demanda e reutilizada no
+processo, portanto a primeira resposta com um atributo `Domain` paga o custo de inicialização.
+O benchmark padrão não mede isoladamente esse caminho frio nem cookies cross-domain.
