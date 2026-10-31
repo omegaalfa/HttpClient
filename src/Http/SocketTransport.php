@@ -36,7 +36,10 @@ final class SocketTransport implements TransportInterface
 
     private function sendStreamWithRedirects(Request $request, RequestOptions $options, int $redirectsRemaining): StreamResponse
     {
-        $totalDeadlineNs = hrtime(true) + (int)($options->totalTimeout * 1_000_000_000);
+        $totalDeadlineNs = $options->totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
+        if ($options->totalDeadlineNs === null) {
+            $options = $options->withTotalDeadlineNs($totalDeadlineNs);
+        }
         $prepared = $this->prepareRequest($request, $options);
         $url = parse_url($prepared['url']);
 
@@ -100,7 +103,10 @@ final class SocketTransport implements TransportInterface
 
     private function sendWithRedirects(Request $request, RequestOptions $options, int $redirectsRemaining): Response
     {
-        $totalDeadlineNs = hrtime(true) + (int)($options->totalTimeout * 1_000_000_000);
+        $totalDeadlineNs = $options->totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
+        if ($options->totalDeadlineNs === null) {
+            $options = $options->withTotalDeadlineNs($totalDeadlineNs);
+        }
         $prepared = $this->prepareRequest($request, $options);
         $url = parse_url($prepared['url']);
 
@@ -423,16 +429,17 @@ final class SocketTransport implements TransportInterface
 
     private function connectionPoolKey(string $scheme, string $host, int $port, RequestOptions $options): string
     {
+        $tlsPolicy = $scheme === 'https' ? ($options->verifySsl ? 'tls-verify' : 'tls-insecure') : 'plain';
         if ($options->proxy === null) {
-            return sprintf('%s://%s:%d', $scheme, strtolower($host), $port);
+            return sprintf('%s://%s:%d|%s', $scheme, strtolower($host), $port, $tlsPolicy);
         }
 
         $proxy = $this->parseProxy($options->proxy);
         if ($scheme === 'http') {
-            return sprintf('proxy-http://%s:%d->%s://%s:%d', $proxy['host'], $proxy['port'], $scheme, strtolower($host), $port);
+            return sprintf('proxy-http://%s:%d->%s://%s:%d|%s', $proxy['host'], $proxy['port'], $scheme, strtolower($host), $port, $tlsPolicy);
         }
 
-        return sprintf('proxy-connect://%s:%d->%s://%s:%d', $proxy['host'], $proxy['port'], $scheme, strtolower($host), $port);
+        return sprintf('proxy-connect://%s:%d->%s://%s:%d|%s', $proxy['host'], $proxy['port'], $scheme, strtolower($host), $port, $tlsPolicy);
     }
 
     /**
@@ -610,17 +617,31 @@ final class SocketTransport implements TransportInterface
      */
     private function readResponse($socket, RequestOptions $options, ?int $totalDeadlineNs = null, string $method = 'GET'): array
     {
-        $headerBuffer = '';
-        $body = '';
-        $headers = null;
-        $status = null;
-        $contentLength = null;
-        $chunked = false;
-        $decoder = null;
-        $deadlineNs = $totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
+        [$status, $headers, $body, $contentLength, $chunked] = $this->readResponseHead($socket, $options, $totalDeadlineNs, $method);
+        if (!$this->responseExpectsBody($method, $status)) {
+            return [$status, $headers, ''];
+        }
+
+        $decoder = $chunked ? new ChunkedDecoder() : null;
+        if ($decoder !== null && $body !== '') {
+            $decoder->push($body);
+            $body = '';
+        }
+
+        $deadlineNs = $totalDeadlineNs ?? $options->totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
         $readDeadline = hrtime(true) + (int)($options->readTimeout * 1_000_000_000);
 
         while (true) {
+            if ($decoder !== null && $decoder->isCompleted()) {
+                break;
+            }
+            if ($decoder === null && $contentLength !== null && strlen($body) >= $contentLength) {
+                if (strlen($body) > $contentLength) {
+                    throw new ConnectionException('Response body exceeds Content-Length');
+                }
+                break;
+            }
+
             $this->ensureTotalTimeout($deadlineNs);
             if (hrtime(true) >= $readDeadline) {
                 throw new TimeoutException('Read timed out');
@@ -644,60 +665,11 @@ final class SocketTransport implements TransportInterface
             }
 
             $readDeadline = hrtime(true) + (int)($options->readTimeout * 1_000_000_000);
-
-            if ($headers === null) {
-                $headerBuffer .= $chunk;
-                $position = strpos($headerBuffer, "\r\n\r\n");
-                if ($position === false) {
-                    continue;
-                }
-
-                $rawHeaders = substr($headerBuffer, 0, $position);
-                $body = substr($headerBuffer, $position + 4);
-                $headerBuffer = $rawHeaders;
-                $headers = Headers::fromRaw($rawHeaders);
-                $status = $this->parseStatus($rawHeaders);
-                $contentLengthHeader = $headers->get('Content-Length');
-                $contentLength = $contentLengthHeader !== null ? max(0, (int)$contentLengthHeader) : null;
-                $chunked = str_contains(strtolower((string)$headers->get('Transfer-Encoding', '')), 'chunked');
-
-                if (!$this->responseExpectsBody($method, $status)) {
-                    return [$status, $headers, ''];
-                }
-
-                if ($chunked) {
-                    $decoder = new ChunkedDecoder();
-                    $decoder->push($body);
-                    $body = '';
-
-                    if ($decoder->isCompleted()) {
-                        break;
-                    }
-
-                    continue;
-                }
-            } elseif ($decoder !== null) {
+            if ($decoder !== null) {
                 $decoder->push($chunk);
-
-                if ($decoder->isCompleted()) {
-                    break;
-                }
-
-                continue;
             } else {
                 $body .= $chunk;
             }
-
-            if ($decoder === null && $contentLength !== null && strlen($body) >= $contentLength) {
-                if (strlen($body) !== $contentLength) {
-                    $body = substr($body, 0, $contentLength);
-                }
-                break;
-            }
-        }
-
-        if ($headers === null || $status === null) {
-            throw new ConnectionException('Invalid HTTP response: headers not found');
         }
 
         if ($decoder !== null) {
@@ -717,15 +689,39 @@ final class SocketTransport implements TransportInterface
     private function readResponseHead($socket, RequestOptions $options, ?int $totalDeadlineNs = null, string $method = 'GET'): array
     {
         $headerBuffer = '';
-        $bodyBuffer = '';
-        $headers = null;
-        $status = null;
-        $contentLength = null;
-        $chunked = false;
-        $deadlineNs = $totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
+        $deadlineNs = $totalDeadlineNs ?? $options->totalDeadlineNs ?? (hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
         $readDeadline = hrtime(true) + (int)($options->readTimeout * 1_000_000_000);
+        $interimResponses = 0;
 
         while (true) {
+            while (($position = strpos($headerBuffer, "\r\n\r\n")) !== false) {
+                $rawHeaders = substr($headerBuffer, 0, $position);
+                $headerBuffer = substr($headerBuffer, $position + 4);
+                try {
+                    $headers = Headers::fromRaw($rawHeaders);
+                } catch (\InvalidArgumentException $exception) {
+                    throw new ConnectionException('Invalid HTTP response headers', null, null, 0, $exception);
+                }
+                $status = $this->parseStatus($rawHeaders);
+
+                if ($status === 101) {
+                    throw new ConnectionException('HTTP protocol upgrades are not supported');
+                }
+                if ($status >= 100 && $status < 200) {
+                    if (++$interimResponses > 16) {
+                        throw new ConnectionException('Too many informational HTTP responses');
+                    }
+                    continue;
+                }
+
+                if (!$this->responseExpectsBody($method, $status)) {
+                    return [$status, $headers, '', 0, false];
+                }
+
+                [$contentLength, $chunked] = $this->parseResponseFraming($headers);
+                return [$status, $headers, $headerBuffer, $contentLength, $chunked];
+            }
+
             $this->ensureTotalTimeout($deadlineNs);
             if (hrtime(true) >= $readDeadline) {
                 throw new TimeoutException('Read timed out');
@@ -750,32 +746,9 @@ final class SocketTransport implements TransportInterface
 
             $readDeadline = hrtime(true) + (int)($options->readTimeout * 1_000_000_000);
             $headerBuffer .= $chunk;
-            $position = strpos($headerBuffer, "\r\n\r\n");
-            if ($position === false) {
-                continue;
-            }
-
-            $rawHeaders = substr($headerBuffer, 0, $position);
-            $bodyBuffer = substr($headerBuffer, $position + 4);
-            $headerBuffer = $rawHeaders;
-            $headers = Headers::fromRaw($rawHeaders);
-            $status = $this->parseStatus($rawHeaders);
-            $contentLengthHeader = $headers->get('Content-Length');
-            $contentLength = $contentLengthHeader !== null ? max(0, (int)$contentLengthHeader) : null;
-            $chunked = str_contains(strtolower((string)$headers->get('Transfer-Encoding', '')), 'chunked');
-
-            if (!$this->responseExpectsBody($method, $status)) {
-                return [$status, $headers, '', 0, false];
-            }
-
-            break;
         }
 
-        if ($headers === null) {
-            throw new ConnectionException('Invalid HTTP response: headers not found');
-        }
-
-        return [$status, $headers, $bodyBuffer, $contentLength, $chunked];
+        throw new ConnectionException('Invalid HTTP response: headers not found');
     }
 
     /**
@@ -853,6 +826,12 @@ final class SocketTransport implements TransportInterface
      */
     private function buildRedirectedRequest(Request $request, RequestOptions $options, string $currentUrl, string $location, int $status): Request
     {
+        $currentScheme = strtolower((string) (parse_url($currentUrl, PHP_URL_SCHEME) ?: 'http'));
+        $targetScheme = strtolower((string) (parse_url($location, PHP_URL_SCHEME) ?: $currentScheme));
+        if ($currentScheme === 'https' && $targetScheme === 'http' && !$options->allowInsecureRedirects) {
+            throw new ConnectionException('Refusing HTTPS to HTTP redirect', $request);
+        }
+
         $redirected = $request->withUrl($location);
 
         if (in_array($status, [301, 302, 303], true) && $request->method !== 'GET') {
@@ -863,9 +842,16 @@ final class SocketTransport implements TransportInterface
             return $redirected;
         }
 
-        $headers = Headers::from($redirected->headers)
-            ->remove('Authorization')
-            ->remove('Cookie');
+        $headers = Headers::from($redirected->headers);
+        $sensitiveHeaders = array_fill_keys(
+            array_merge(['authorization', 'proxy-authorization', 'cookie'], $options->sensitiveHeaders),
+            true
+        );
+        foreach ($headers->toArray() as $name => $_value) {
+            if (isset($sensitiveHeaders[strtolower($name)])) {
+                $headers->remove($name);
+            }
+        }
 
         $strippedOptions = clone $options;
         $strippedOptions->bearerToken = null;
@@ -929,6 +915,71 @@ final class SocketTransport implements TransportInterface
     private function responseExpectsBody(string $method, int $status): bool
     {
         return strtoupper($method) !== 'HEAD' && !in_array($status, [204, 205, 304], true);
+    }
+
+    /** @return array{0: ?int, 1: bool} */
+    private function parseResponseFraming(Headers $headers): array
+    {
+        $lengthValues = $headers->values('Content-Length');
+        $transferValues = $headers->values('Transfer-Encoding');
+
+        if ($lengthValues !== [] && $transferValues !== []) {
+            throw new ConnectionException('Ambiguous response framing: both Content-Length and Transfer-Encoding are present');
+        }
+
+        $contentLength = null;
+        foreach ($lengthValues as $value) {
+            foreach (explode(',', $value) as $candidate) {
+                $candidate = trim($candidate);
+                if ($candidate === '') {
+                    throw new ConnectionException('Invalid Content-Length response header');
+                }
+
+                $digits = strlen($candidate);
+                for ($i = 0; $i < $digits; $i++) {
+                    $byte = ord($candidate[$i]);
+                    if ($byte < 48 || $byte > 57) {
+                        throw new ConnectionException('Invalid Content-Length response header');
+                    }
+                }
+
+                $max = (string) PHP_INT_MAX;
+                $normalized = ltrim($candidate, '0');
+                $normalized = $normalized === '' ? '0' : $normalized;
+                if (strlen($normalized) > strlen($max)
+                    || (strlen($normalized) === strlen($max) && strcmp($normalized, $max) > 0)
+                ) {
+                    throw new ConnectionException('Content-Length exceeds the supported range');
+                }
+
+                $parsed = (int) $normalized;
+                if ($contentLength !== null && $contentLength !== $parsed) {
+                    throw new ConnectionException('Conflicting Content-Length response headers');
+                }
+                $contentLength = $parsed;
+            }
+        }
+
+        if ($transferValues === []) {
+            return [$contentLength, false];
+        }
+
+        $codings = [];
+        foreach ($transferValues as $value) {
+            foreach (explode(',', strtolower($value)) as $coding) {
+                $coding = trim($coding);
+                if ($coding === '') {
+                    throw new ConnectionException('Invalid Transfer-Encoding response header');
+                }
+                $codings[] = $coding;
+            }
+        }
+
+        if ($codings !== ['chunked']) {
+            throw new ConnectionException('Unsupported or invalid Transfer-Encoding response header');
+        }
+
+        return [null, true];
     }
 
     /**

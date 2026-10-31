@@ -8,6 +8,10 @@ use Omegaalfa\HttpClient\Http\AsyncHttpClient;
 use function Omegaalfa\HttpClient\Http\await;
 use function Omegaalfa\HttpClient\Http\awaitAll;
 
+// Usage: php benchmark.php [iterations] [batchSize] [warmup] [serverWorkers] [batchSamples].
+// P95 for concurrent scenarios is measured per batch, not per individual request.
+// Run the script at least three times and compare medians for stable conclusions.
+
 /**
  * Benchmark mais rigoroso e realista para comparar Omegaalfa HttpClient vs Guzzle.
  *
@@ -27,7 +31,7 @@ final class BetterBenchmarkServer
     private $process = null;
     private int $port;
 
-    public function __construct()
+    public function __construct(private readonly int $workers = 16)
     {
         $this->port = $this->reservePort();
         $this->start();
@@ -101,7 +105,8 @@ PHP;
         file_put_contents($routerFile, $router);
 
         $command = sprintf(
-            'PHP_CLI_SERVER_WORKERS=16 %s -n -S 127.0.0.1:%d %s',
+            'PHP_CLI_SERVER_WORKERS=%d %s -n -S 127.0.0.1:%d %s',
+            $this->workers,
             escapeshellarg(PHP_BINARY),
             $this->port,
             escapeshellarg($routerFile)
@@ -147,6 +152,8 @@ class ResultCollector
     public int $bytesTransferred = 0;
     public float $memoryPeak = 0.0;
 
+    public bool $batchSamples = false;
+
     public function add(float $time, bool $success, int $bytes = 0): void
     {
         $this->times[] = $time;
@@ -161,6 +168,7 @@ class ResultCollector
 
     public function addBatch(float $time, int $successes, int $attempts, int $bytes = 0): void
     {
+        $this->batchSamples = true;
         $this->times[] = $time;
         $this->success += $successes;
         $this->errors += $attempts - $successes;
@@ -198,7 +206,7 @@ class ResultCollector
     public function throughput(): float
     {
         $total = array_sum($this->times);
-        return $total > 0 ? ($this->success + $this->errors) / $total : 0.0;
+        return $total > 0 ? $this->success / $total : 0.0;
     }
 
     public function stdDev(): float
@@ -221,14 +229,15 @@ function printSection(string $title): void
 function printResults(string $label, ResultCollector $result, string $compareLabel = '', ResultCollector $compare = null): void
 {
     printf("\n📊 %s\n", $label);
-    printf('   Requests: %d, success: %d, errors: %d, samples: %d%s', $result->success + $result->errors, $result->success, $result->errors, count($result->times), PHP_EOL);
+    printf('   Requests: %d, success: %d, errors: %d, samples: %d (%s)%s', $result->success + $result->errors, $result->success, $result->errors, count($result->times), $result->batchSamples ? 'batches' : 'requests', PHP_EOL);
     printf("   Throughput:   %.2f req/s\n", $result->throughput());
     printf("   Média:        %.4f ms\n", $result->avg() * 1000);
     printf("   Mediana:      %.4f ms\n", $result->median() * 1000);
-    printf("   P95:          %.4f ms\n", $result->percentile(95) * 1000);
-    printf("   P99:          %.4f ms\n", $result->percentile(99) * 1000);
-    printf("   StdDev:       %.4f ms\n", $result->stdDev() * 1000);
-    printf("   Memória:      %.2f MB (pico)\n", $result->memoryPeak);
+    $sampleUnit = $result->batchSamples ? 'lote' : 'request';
+    printf("   P95 (%s): %.4f ms\n", $sampleUnit, $result->percentile(95) * 1000);
+    printf("   P99 (%s): %.4f ms\n", $sampleUnit, $result->percentile(99) * 1000);
+    printf("   StdDev (%s):  %.4f ms\n", $sampleUnit, $result->stdDev() * 1000);
+    printf("   Memória:      %.2f MB (pico acumulado do processo)\n", $result->memoryPeak);
     printf("   Bytes:        %s transferidos\n", number_format($result->bytesTransferred));
 
     if ($compare !== null && $compare->avg() > 0) {
@@ -244,13 +253,31 @@ function printResults(string $label, ResultCollector $result, string $compareLab
 $iterations = (int) ($argv[1] ?? 500);
 $batchSize  = (int) ($argv[2] ?? 25);
 $warmup     = (int) ($argv[3] ?? 50);
+$serverWorkers = max(1, (int) ($argv[4] ?? 16));
+$batchSampleTarget = max(2, (int) ($argv[5] ?? 100));
+$batchIterations = max($iterations, $batchSize * $batchSampleTarget);
+
+if ($iterations < 1 || $batchSize < 1 || $warmup < 0) {
+    throw new InvalidArgumentException('iterations and batchSize must be positive; warmup cannot be negative');
+}
+if (!extension_loaded('curl')) {
+    throw new RuntimeException('The benchmark requires ext-curl so Guzzle uses its cURL handler');
+}
 
 echo "🔧 Configurações:\n";
 echo "   Iterações: {$iterations}\n";
 echo "   Batch size (concorrente): {$batchSize}\n";
+echo "   Amostras-alvo por batch: {$batchSampleTarget}\n";
+echo "   Requests nos cenários batch: {$batchIterations}\n";
 echo "   Warmup: {$warmup}\n";
+echo "   PHP runtime: " . PHP_VERSION . ' / ' . PHP_SAPI . PHP_EOL;
+echo "   OS: " . PHP_OS_FAMILY . ' (' . PHP_OS . ')' . PHP_EOL;
+echo "   OPcache CLI: " . (ini_get('opcache.enable_cli') ?: 'Off') . PHP_EOL;
+echo "   JIT: " . (ini_get('opcache.jit') ?: 'disable') . PHP_EOL;
+echo "   cURL: " . (curl_version()['version'] ?? 'unknown') . PHP_EOL;
+echo "   Server workers: {$serverWorkers}\n";
 
-$server = new BetterBenchmarkServer();
+$server = new BetterBenchmarkServer($serverWorkers);
 $base = $server->baseUrl();
 
 try {
@@ -258,15 +285,48 @@ try {
         'timeout' => 10,
         'connect_timeout' => 5,
         'http_errors' => false,
+        'allow_redirects' => ['max' => 3],
+        'decode_content' => false,
     ]);
 
-    $ours = (new AsyncHttpClient())->withKeepAlive(true);
+    $ours = (new AsyncHttpClient())
+        ->withTimeout(10)
+        ->connectTimeout(5)
+        ->readTimeout(10)
+        ->writeTimeout(10)
+        ->withKeepAlive(true);
+    $guzzleOptions = ['headers' => ['Connection' => 'keep-alive']];
+    $measureOurs = static function (string $url) use ($ours): array {
+        $start = hrtime(true);
+        $response = await($ours->get($url));
+        $body = $response->body();
+        return [(hrtime(true) - $start) / 1e9, $response->status() === 200 && $body !== '', strlen($body)];
+    };
+    $measureGuzzle = static function (string $url) use ($guzzle, $guzzleOptions): array {
+        $start = hrtime(true);
+        $response = $guzzle->get($url, $guzzleOptions);
+        $body = $response->getBody()->getContents();
+        return [(hrtime(true) - $start) / 1e9, $response->getStatusCode() === 200 && $body !== '', strlen($body)];
+    };
 
     // Warmup
     echo "\n🔥 Warmup...\n";
     for ($i = 0; $i < $warmup; $i++) {
         await($ours->get($base . '/json'));
-        $guzzle->get($base . '/json', ['headers' => ['Connection' => 'keep-alive']]);
+        $guzzle->get($base . '/json', $guzzleOptions);
+    }
+
+    // Warm each client's connection pool with the same concurrent wave.
+    $warmBatch = min($batchSize, $warmup);
+    if ($warmBatch > 1) {
+        $warmFutures = [];
+        $warmPromises = [];
+        for ($i = 0; $i < $warmBatch; $i++) {
+            $warmFutures[] = $ours->get($base . '/json?warm=' . $i);
+            $warmPromises[] = $guzzle->getAsync($base . '/json?warm=' . $i, $guzzleOptions);
+        }
+        awaitAll($warmFutures);
+        \GuzzleHttp\Promise\Utils::settle($warmPromises)->wait();
     }
     gc_collect_cycles();
 
@@ -279,17 +339,17 @@ try {
     $guzzleSmallSerial = new ResultCollector();
 
     for ($i = 0; $i < $iterations; $i++) {
-        $start = hrtime(true);
-        $resp = await($ours->get($base . '/json?lang=pt-BR'));
-        $time = (hrtime(true) - $start) / 1e9;
-        $oursSmallSerial->add($time, $resp->status() === 200, strlen($resp->body() ?? ''));
-    }
-
-    for ($i = 0; $i < $iterations; $i++) {
-        $start = hrtime(true);
-        $resp = $guzzle->get($base . '/json?lang=pt-BR', ['headers' => ['Connection' => 'keep-alive']]);
-        $time = (hrtime(true) - $start) / 1e9;
-        $guzzleSmallSerial->add($time, $resp->getStatusCode() === 200, strlen($resp->getBody()->getContents()));
+        if (($i % 2) === 0) {
+            [$time, $success, $bytes] = $measureOurs($base . '/json?lang=pt-BR');
+            $oursSmallSerial->add($time, $success, $bytes);
+            [$time, $success, $bytes] = $measureGuzzle($base . '/json?lang=pt-BR');
+            $guzzleSmallSerial->add($time, $success, $bytes);
+        } else {
+            [$time, $success, $bytes] = $measureGuzzle($base . '/json?lang=pt-BR');
+            $guzzleSmallSerial->add($time, $success, $bytes);
+            [$time, $success, $bytes] = $measureOurs($base . '/json?lang=pt-BR');
+            $oursSmallSerial->add($time, $success, $bytes);
+        }
     }
 
     printResults('Omegaalfa (serial pequeno)', $oursSmallSerial, 'Guzzle', $guzzleSmallSerial);
@@ -303,39 +363,52 @@ try {
     $oursSmallBatch = new ResultCollector();
     $guzzleSmallBatch = new ResultCollector();
 
-    $completed = 0;
-    while ($completed < $iterations) {
-        $batch = min($batchSize, $iterations - $completed);
+    $measureOursBatch = static function (int $offset, int $batch) use ($ours, $base): array {
+        $start = hrtime(true);
         $futures = [];
         for ($i = 0; $i < $batch; $i++) {
-            $futures[] = $ours->get($base . '/json?n=' . ($completed + $i));
+            $futures[] = $ours->get($base . '/json?n=' . ($offset + $i));
         }
-        $start = hrtime(true);
         $responses = awaitAll($futures);
         $time = (hrtime(true) - $start) / 1e9;
-        $success = count(array_filter($responses, fn($r) => $r->status() === 200));
-        $bytes = array_sum(array_map(fn($r) => strlen($r->body() ?? ''), $responses));
-        $oursSmallBatch->addBatch($time, $success, $batch, $bytes);
-        $completed += $batch;
-    }
-
-    $completed = 0;
-    while ($completed < $iterations) {
-        $batch = min($batchSize, $iterations - $completed);
+        $success = count(array_filter($responses, static fn ($response): bool => $response->status() === 200 && $response->body() !== ''));
+        $bytes = array_sum(array_map(static fn ($response): int => strlen($response->body()), $responses));
+        return [$time, $success, $bytes];
+    };
+    $measureGuzzleBatch = static function (int $offset, int $batch) use ($guzzle, $base, $guzzleOptions): array {
+        $start = hrtime(true);
         $promises = [];
         for ($i = 0; $i < $batch; $i++) {
-            $promises[] = $guzzle->getAsync($base . '/json?n=' . ($completed + $i), ['headers' => ['Connection' => 'keep-alive']]);
+            $promises[] = $guzzle->getAsync($base . '/json?n=' . ($offset + $i), $guzzleOptions);
         }
-        $start = hrtime(true);
         $settled = \GuzzleHttp\Promise\Utils::settle($promises)->wait();
         $time = (hrtime(true) - $start) / 1e9;
-        $success = count(array_filter($settled, fn($r) => ($r['state'] ?? '') === 'fulfilled' && $r['value']->getStatusCode() === 200));
-        $bytes = array_sum(array_map(function($r) {
-            if (($r['state'] ?? '') !== 'fulfilled') return 0;
-            return strlen($r['value']->getBody()->getContents());
+        $success = count(array_filter($settled, static fn ($result): bool => ($result['state'] ?? '') === 'fulfilled'
+            && $result['value']->getStatusCode() === 200
+            && $result['value']->getBody()->getSize() > 0));
+        $bytes = array_sum(array_map(static function ($result): int {
+            return ($result['state'] ?? '') === 'fulfilled' ? (int) $result['value']->getBody()->getSize() : 0;
         }, $settled));
-        $guzzleSmallBatch->addBatch($time, $success, $batch, $bytes);
+        return [$time, $success, $bytes];
+    };
+
+    $completed = 0;
+    $batchNumber = 0;
+    while ($completed < $batchIterations) {
+        $batch = min($batchSize, $batchIterations - $completed);
+        if (($batchNumber % 2) === 0) {
+            [$time, $success, $bytes] = $measureOursBatch($completed, $batch);
+            $oursSmallBatch->addBatch($time, $success, $batch, $bytes);
+            [$time, $success, $bytes] = $measureGuzzleBatch($completed, $batch);
+            $guzzleSmallBatch->addBatch($time, $success, $batch, $bytes);
+        } else {
+            [$time, $success, $bytes] = $measureGuzzleBatch($completed, $batch);
+            $guzzleSmallBatch->addBatch($time, $success, $batch, $bytes);
+            [$time, $success, $bytes] = $measureOursBatch($completed, $batch);
+            $oursSmallBatch->addBatch($time, $success, $batch, $bytes);
+        }
         $completed += $batch;
+        $batchNumber++;
     }
 
     printResults('Omegaalfa (batch pequeno)', $oursSmallBatch, 'Guzzle', $guzzleSmallBatch);
@@ -350,17 +423,17 @@ try {
     $guzzleLatency = new ResultCollector();
 
     for ($i = 0; $i < $iterations; $i++) {
-        $start = hrtime(true);
-        $resp = await($ours->get($base . '/json?latency=10'));
-        $time = (hrtime(true) - $start) / 1e9;
-        $oursLatency->add($time, $resp->status() === 200);
-    }
-
-    for ($i = 0; $i < $iterations; $i++) {
-        $start = hrtime(true);
-        $resp = $guzzle->get($base . '/json?latency=10');
-        $time = (hrtime(true) - $start) / 1e9;
-        $guzzleLatency->add($time, $resp->getStatusCode() === 200);
+        if (($i % 2) === 0) {
+            [$time, $success, $bytes] = $measureOurs($base . '/json?latency=10');
+            $oursLatency->add($time, $success, $bytes);
+            [$time, $success, $bytes] = $measureGuzzle($base . '/json?latency=10');
+            $guzzleLatency->add($time, $success, $bytes);
+        } else {
+            [$time, $success, $bytes] = $measureGuzzle($base . '/json?latency=10');
+            $guzzleLatency->add($time, $success, $bytes);
+            [$time, $success, $bytes] = $measureOurs($base . '/json?latency=10');
+            $oursLatency->add($time, $success, $bytes);
+        }
     }
 
     printResults('Omegaalfa (latência 10ms)', $oursLatency, 'Guzzle', $guzzleLatency);
@@ -375,17 +448,17 @@ try {
     $guzzleLarge = new ResultCollector();
 
     for ($i = 0; $i < min($iterations, 200); $i++) {
-        $start = hrtime(true);
-        $resp = await($ours->get($base . '/large?size=102400'));
-        $time = (hrtime(true) - $start) / 1e9;
-        $oursLarge->add($time, $resp->status() === 200, strlen($resp->body() ?? ''));
-    }
-
-    for ($i = 0; $i < min($iterations, 200); $i++) {
-        $start = hrtime(true);
-        $resp = $guzzle->get($base . '/large?size=102400');
-        $time = (hrtime(true) - $start) / 1e9;
-        $guzzleLarge->add($time, $resp->getStatusCode() === 200, strlen($resp->getBody()->getContents()));
+        if (($i % 2) === 0) {
+            [$time, $success, $bytes] = $measureOurs($base . '/large?size=102400');
+            $oursLarge->add($time, $success, $bytes);
+            [$time, $success, $bytes] = $measureGuzzle($base . '/large?size=102400');
+            $guzzleLarge->add($time, $success, $bytes);
+        } else {
+            [$time, $success, $bytes] = $measureGuzzle($base . '/large?size=102400');
+            $guzzleLarge->add($time, $success, $bytes);
+            [$time, $success, $bytes] = $measureOurs($base . '/large?size=102400');
+            $oursLarge->add($time, $success, $bytes);
+        }
     }
 
     printResults('Omegaalfa (payload 100KB)', $oursLarge, 'Guzzle', $guzzleLarge);
@@ -401,17 +474,17 @@ try {
 
     $slowIterations = min($iterations, 100);
     for ($i = 0; $i < $slowIterations; $i++) {
-        $start = hrtime(true);
-        $resp = await($ours->get($base . '/slow'));
-        $time = (hrtime(true) - $start) / 1e9;
-        $oursSlow->add($time, $resp->status() === 200);
-    }
-
-    for ($i = 0; $i < $slowIterations; $i++) {
-        $start = hrtime(true);
-        $resp = $guzzle->get($base . '/slow');
-        $time = (hrtime(true) - $start) / 1e9;
-        $guzzleSlow->add($time, $resp->getStatusCode() === 200);
+        if (($i % 2) === 0) {
+            [$time, $success, $bytes] = $measureOurs($base . '/slow');
+            $oursSlow->add($time, $success, $bytes);
+            [$time, $success, $bytes] = $measureGuzzle($base . '/slow');
+            $guzzleSlow->add($time, $success, $bytes);
+        } else {
+            [$time, $success, $bytes] = $measureGuzzle($base . '/slow');
+            $guzzleSlow->add($time, $success, $bytes);
+            [$time, $success, $bytes] = $measureOurs($base . '/slow');
+            $oursSlow->add($time, $success, $bytes);
+        }
     }
 
     printResults('Omegaalfa (lento 150ms)', $oursSlow, 'Guzzle', $guzzleSlow);
@@ -425,35 +498,53 @@ try {
     $oursConcLatency = new ResultCollector();
     $guzzleConcLatency = new ResultCollector();
 
-    $completed = 0;
-    $concIterations = min($iterations, 200);
-    while ($completed < $concIterations) {
-        $batch = min($batchSize, $concIterations - $completed);
+    $measureOursLatencyBatch = static function (int $offset, int $batch) use ($ours, $base): array {
+        $start = hrtime(true);
         $futures = [];
         for ($i = 0; $i < $batch; $i++) {
-            $futures[] = $ours->get($base . '/json?latency=10&n=' . ($completed + $i));
+            $futures[] = $ours->get($base . '/json?latency=10&n=' . ($offset + $i));
         }
-        $start = hrtime(true);
         $responses = awaitAll($futures);
         $time = (hrtime(true) - $start) / 1e9;
-        $success = count(array_filter($responses, fn($r) => $r->status() === 200));
-        $oursConcLatency->addBatch($time, $success, $batch);
-        $completed += $batch;
-    }
-
-    $completed = 0;
-    while ($completed < $concIterations) {
-        $batch = min($batchSize, $concIterations - $completed);
+        $success = count(array_filter($responses, static fn ($response): bool => $response->status() === 200 && $response->body() !== ''));
+        $bytes = array_sum(array_map(static fn ($response): int => strlen($response->body()), $responses));
+        return [$time, $success, $bytes];
+    };
+    $measureGuzzleLatencyBatch = static function (int $offset, int $batch) use ($guzzle, $base, $guzzleOptions): array {
+        $start = hrtime(true);
         $promises = [];
         for ($i = 0; $i < $batch; $i++) {
-            $promises[] = $guzzle->getAsync($base . '/json?latency=10&n=' . ($completed + $i));
+            $promises[] = $guzzle->getAsync($base . '/json?latency=10&n=' . ($offset + $i), $guzzleOptions);
         }
-        $start = hrtime(true);
         $settled = \GuzzleHttp\Promise\Utils::settle($promises)->wait();
         $time = (hrtime(true) - $start) / 1e9;
-        $success = count(array_filter($settled, fn($r) => ($r['state'] ?? '') === 'fulfilled' && $r['value']->getStatusCode() === 200));
-        $guzzleConcLatency->addBatch($time, $success, $batch);
+        $success = count(array_filter($settled, static fn ($result): bool => ($result['state'] ?? '') === 'fulfilled'
+            && $result['value']->getStatusCode() === 200
+            && $result['value']->getBody()->getSize() > 0));
+        $bytes = array_sum(array_map(static function ($result): int {
+            return ($result['state'] ?? '') === 'fulfilled' ? (int) $result['value']->getBody()->getSize() : 0;
+        }, $settled));
+        return [$time, $success, $bytes];
+    };
+
+    $completed = 0;
+    $batchNumber = 0;
+    $concIterations = $batchIterations;
+    while ($completed < $concIterations) {
+        $batch = min($batchSize, $concIterations - $completed);
+        if (($batchNumber % 2) === 0) {
+            [$time, $success, $bytes] = $measureOursLatencyBatch($completed, $batch);
+            $oursConcLatency->addBatch($time, $success, $batch, $bytes);
+            [$time, $success, $bytes] = $measureGuzzleLatencyBatch($completed, $batch);
+            $guzzleConcLatency->addBatch($time, $success, $batch, $bytes);
+        } else {
+            [$time, $success, $bytes] = $measureGuzzleLatencyBatch($completed, $batch);
+            $guzzleConcLatency->addBatch($time, $success, $batch, $bytes);
+            [$time, $success, $bytes] = $measureOursLatencyBatch($completed, $batch);
+            $oursConcLatency->addBatch($time, $success, $batch, $bytes);
+        }
         $completed += $batch;
+        $batchNumber++;
     }
 
     printResults('Omegaalfa (batch + latência)', $oursConcLatency, 'Guzzle', $guzzleConcLatency);
@@ -472,6 +563,17 @@ try {
         ['Lento 150ms', $oursSlow, $guzzleSlow],
         ['Batch + latência', $oursConcLatency, $guzzleConcLatency],
     ];
+
+    foreach ($scenarios as [$name, $oursResult, $guzzleResult]) {
+        if ($oursResult->errors > 0 || $guzzleResult->errors > 0) {
+            throw new RuntimeException(sprintf(
+                'Benchmark run invalid: scenario "%s" had %d HttpClient and %d Guzzle failures',
+                $name,
+                $oursResult->errors,
+                $guzzleResult->errors
+            ));
+        }
+    }
 
     printf("\n%-25s | %-12s | %-12s | %-10s | %-10s\n", 'Cenário', 'Omegaalfa', 'Guzzle', 'Diferença', 'Vencedor');
     echo str_repeat('-', 80) . "\n";

@@ -58,50 +58,49 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ==========================
-      # 🔍 Detect commit range
-      # ==========================
-      - name: Determine commit range
-        id: commit-range
-        run: |
-          git fetch --prune
-          LAST_COMMIT=$(git rev-parse ${{ github.event.before }} 2>/dev/null || git rev-parse HEAD~1)
-          CURRENT_COMMIT=$(git rev-parse HEAD)
-          echo "LAST_COMMIT=$LAST_COMMIT" >> $GITHUB_ENV
-          echo "CURRENT_COMMIT=$CURRENT_COMMIT" >> $GITHUB_ENV
-          echo "Debug: Commit range $LAST_COMMIT..$CURRENT_COMMIT"
-
-      # ==========================
-      # 🚫 Skip Dependabot commits
-      # ==========================
-      - name: Skip check for Dependabot
-        if: ${{ github.actor == 'dependabot[bot]' }}
-        run: echo "Skipping Conventional Commit check for Dependabot." && exit 0
-
-      # ==========================
-      # 🧩 Check commit messages
-      # ==========================
+      # Check every commit introduced by this push or pull request.
       - name: Check commit messages
-        id: commit-check
+        if: ${{ github.actor != 'dependabot[bot]' }}
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before || '' }}
+          PUSH_AFTER: ${{ github.event.after || github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha || '' }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha || '' }}
         run: |
-          COMMITS=$(git log --format='%s' "${LAST_COMMIT}..${CURRENT_COMMIT}")
-          echo "Debug: All commits in range:"
-          echo "$COMMITS"
-          CONVENTIONAL_COMMITS=$(echo "$COMMITS" | grep -E '^(feat|fix|docs|style|refactor|test|build|perf|ci|chore|revert|merge|wip): ' || true)
-          echo "Debug: Conventional commits found:"
-          echo "$CONVENTIONAL_COMMITS"
-          echo "stdout<<EOF" >> $GITHUB_OUTPUT
-          echo "$CONVENTIONAL_COMMITS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Verify commit messages
-        run: |
-          echo "Debug: Commit check output: '${{ steps.commit-check.outputs.stdout }}'"
-          if [ -n "${{ steps.commit-check.outputs.stdout }}" ]; then
-            echo "✅ Commit messages follow Conventional Commits specification."
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            BASE_SHA="$PR_BASE"
+            HEAD_SHA="$PR_HEAD"
           else
-            echo "❌ Some commit messages do not follow Conventional Commits specification."
-            git log --format='%s' "${LAST_COMMIT}..${CURRENT_COMMIT}"
+            BASE_SHA="$PUSH_BEFORE"
+            HEAD_SHA="$PUSH_AFTER"
+          fi
+
+          ZERO_SHA="0000000000000000000000000000000000000000"
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" == "$ZERO_SHA" ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "No valid base commit was provided; checking the head commit only."
+            mapfile -t COMMITS < <(git log -1 --format='%s' "$HEAD_SHA")
+          else
+            mapfile -t COMMITS < <(git log --format='%s' "${BASE_SHA}..${HEAD_SHA}")
+          fi
+
+          if (( ${#COMMITS[@]} == 0 )); then
+            echo "No commits found in the event range."
+            exit 1
+          fi
+
+          COMMIT_PATTERN='^(feat|fix|docs|style|refactor|test|build|perf|ci|chore|revert)(\([^()]+\))?!?: .+'
+          INVALID=0
+          for MESSAGE in "${COMMITS[@]}"; do
+            if [[ "$MESSAGE" =~ $COMMIT_PATTERN ]]; then
+              echo "✅ $MESSAGE"
+            else
+              echo "❌ Invalid Conventional Commit message: $MESSAGE"
+              INVALID=1
+            fi
+          done
+
+          if (( INVALID != 0 )); then
             exit 1
           fi
 

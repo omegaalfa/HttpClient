@@ -131,4 +131,15 @@ final class CookieJarTest extends TestCase
         self::assertSame('pref=1', $jar->headerFor('service.local', '/', false));
         self::assertNull($jar->headerFor('other.local', '/', false));
     }
+
+    public function testMaxAgeTakesPrecedenceOverExpires(): void
+    {
+        $headers = new Headers();
+        $headers->add('Set-Cookie', 'short=1; Expires=Wed, 21 Oct 2037 07:28:00 GMT; Max-Age=0');
+
+        $jar = new CookieJar();
+        $jar->storeFromHeaders($headers, 'service.local');
+
+        self::assertNull($jar->headerFor('service.local', '/', false));
+    }
 }

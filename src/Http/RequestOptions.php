@@ -26,7 +26,12 @@ final class RequestOptions
         public float $connectTimeout = 10.0,
         public float $readTimeout = 30.0,
         public float $writeTimeout = 30.0,
-        public float $totalTimeout = 60.0
+        public float $totalTimeout = 60.0,
+        public bool $allowInsecureRedirects = false,
+        /** @var list<string> */
+        public array $sensitiveHeaders = [],
+        /** Absolute monotonic deadline shared by retries and redirects. */
+        public ?int $totalDeadlineNs = null
     ) {
         $this->headers = $headers ?? new Headers();
         $this->cookieJar = $cookieJar ?? new CookieJar();
@@ -196,6 +201,29 @@ final class RequestOptions
     {
         $clone = clone $this;
         $clone->totalTimeout = $seconds;
+        return $clone;
+    }
+
+    public function withAllowInsecureRedirects(bool $allow = true): self
+    {
+        $clone = clone $this;
+        $clone->allowInsecureRedirects = $allow;
+        return $clone;
+    }
+
+    /** @param list<string> $headers */
+    public function withSensitiveHeaders(array $headers): self
+    {
+        $clone = clone $this;
+        $clone->sensitiveHeaders = array_values(array_unique(array_map('strtolower', $headers)));
+        return $clone;
+    }
+
+    /** @internal */
+    public function withTotalDeadlineNs(?int $deadlineNs): self
+    {
+        $clone = clone $this;
+        $clone->totalDeadlineNs = $deadlineNs;
         return $clone;
     }
 }

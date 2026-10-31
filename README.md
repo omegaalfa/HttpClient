@@ -536,9 +536,11 @@ echo $response->status() . PHP_EOL;
 echo $response->redirected() ? 'teve redirect' : 'sem redirect';
 ```
 
-Ao seguir redirect para outra origem (scheme, host ou porta diferentes), o
-cliente remove `Authorization`, `Cookie` e as credenciais bearer/basic
-configuradas — credenciais nunca viajam para outro domínio.
+Redirects entre origens removem `Authorization`, `Proxy-Authorization` e
+`Cookie`, além das credenciais bearer/basic configuradas. Use
+`withSensitiveHeaders()` para marcar headers próprios que também precisam ser
+removidos. Redirects de HTTPS para HTTP são recusados por padrão;
+`withAllowInsecureRedirects()` permite esse downgrade explicitamente.
 
 ### 19. Salvar resposta em arquivo
 
@@ -786,12 +788,25 @@ delay de retry é informado em milissegundos.
 - `withTimeout($seconds)`: atalho para configurar o tempo total.
 - `connectTimeout($seconds)`, `readTimeout($seconds)`, `writeTimeout($seconds)`:
   limites de conexão, leitura e escrita.
-- `totalTimeout($seconds)`: limite de tempo total usado pelo transporte.
+- `totalTimeout($seconds)`: limite monotônico da operação inteira, incluindo
+  redirects, retries e esperas entre tentativas.
 
 Valores padrão: sem retries; espera de 100 ms entre tentativas; backoff
 exponencial desligado; até 3 redirecionamentos; validação TLS ligada; keep-alive
 e compressão desligados; timeout de conexão de 10 s, leitura de 30 s, escrita
 de 30 s e total de 60 s.
+
+### Segurança em redirects e timeout
+
+Opções de segurança e timeout:
+
+- `withAllowInsecureRedirects($allow = true)` permite explicitamente redirects
+  de HTTPS para HTTP. Fica desativado por padrão.
+- `withSensitiveHeaders($names)` indica headers próprios a remover em redirects
+  entre origens. `Authorization`, `Proxy-Authorization` e `Cookie` são removidos
+  automaticamente.
+- `totalTimeout($seconds)` limita a operação inteira, incluindo redirects,
+  retries e esperas entre tentativas.
 
 ### Response
 
@@ -820,7 +835,8 @@ de conclusão.
 ### Headers
 
 Coleção case-insensitive: nomes não diferenciam maiúsculas de minúsculas e um
-header pode ter vários valores. CR, LF e NUL são rejeitados para evitar injeção.
+header pode ter vários valores. Nomes seguem a gramática de token HTTP; valores
+rejeitam caracteres de controle, exceto tab horizontal.
 
 - `new Headers($headers)` / `Headers::from($headers)`: cria uma coleção.
 - `set($name, $value)`: substitui os valores do header.
@@ -839,7 +855,9 @@ header pode ter vários valores. CR, LF e NUL são rejeitados para evitar injeç
 - `file($name, $path, $filename = null, $contentType = null)`: adiciona um arquivo.
 - `build()`: monta todo o conteúdo em memória.
 - `buildToStream()`: prepara stream temporário, tipo de conteúdo e tamanho para
-  o transporte enviar por partes.
+  o transporte enviar por blocos. Os arquivos são copiados primeiro para esse
+  stream temporário, que usa memória até 2 MiB e depois disco; não é streaming
+  direto do arquivo de origem para o socket.
 
 ### Transporte e testes
 
@@ -912,8 +930,20 @@ try {
 
 ## Limitações atuais
 
+- O framing das respostas HTTP é validado estritamente: valores conflitantes
+  ou malformados de `Content-Length`, a presença simultânea de
+  `Content-Length` e `Transfer-Encoding` e codificações diferentes de
+  `chunked` são rejeitados.
+- Respostas informativas (100–199) são ignoradas até a resposta final;
+  upgrade de protocolo (`101`) não é suportado.
+- `send()` materializa a resposta completa em memória e não tem limite de body;
+  use `streamGet()`/`readChunk()` para controlar a leitura de respostas grandes.
+- O cliente não bloqueia destinos privados nem implementa política anti-SSRF.
+  Aplicações que buscam URLs fornecidas por usuários devem validar o destino e
+  cada redirect na camada da aplicação.
+
 - O pool é básico e ainda não possui TTL, health-check ativo ou métricas por origem.
-- O `CookieJar` distingue cookies host-only e cookies com atributo `Domain`, mas não valida public suffixes. Cookies manuais sem domínio ficam associados ao primeiro host que os utiliza.
+- O `CookieJar` distingue cookies host-only e cookies com atributo `Domain`, mas não valida a Public Suffix List. Não compartilhe o jar entre domínios não confiáveis; cookies `Domain` de sufixos públicos não são rejeitados por uma lista local. Cookies manuais sem domínio ficam associados ao primeiro host que os utiliza.
 - O corpo puro em stream (arquivo sem multipart) não é suportado; uploads multipart usam buffer com spill em disco.
 - Não há HTTP/2, HTTP/3 ou WebSocket nativos ainda.
 

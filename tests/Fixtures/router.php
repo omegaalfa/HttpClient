@@ -73,7 +73,7 @@ if ($uri === '/redirect-cross-host') {
     $port = str_contains($host, ':')
         ? (int) substr($host, (int) strrpos($host, ':') + 1)
         : (int) ($_SERVER['SERVER_PORT'] ?? 0);
-    header('Location: http://localhost:' . $port . '/echo-headers', true, 302);
+    header('Location: http://127.0.0.2:' . $port . '/echo-headers', true, 302);
     return;
 }
 

@@ -363,6 +363,17 @@ final class AsyncHttpClient
         return $this->withOptions($this->options->withFollowRedirects($value));
     }
 
+    public function withAllowInsecureRedirects(bool $allow = true): self
+    {
+        return $this->withOptions($this->options->withAllowInsecureRedirects($allow));
+    }
+
+    /** @param list<string> $headers */
+    public function withSensitiveHeaders(array $headers): self
+    {
+        return $this->withOptions($this->options->withSensitiveHeaders($headers));
+    }
+
     public function withVerifySSL(bool $verify): self
     {
         return $this->withOptions($this->options->withVerifySSL($verify));
@@ -425,9 +436,11 @@ final class AsyncHttpClient
     {
         $attempt = 0;
         $options = $request->options ?? $this->options;
+        $options = $options->withTotalDeadlineNs($options->totalDeadlineNs ?? hrtime(true) + (int) ($options->totalTimeout * 1_000_000_000));
         $maxAttempts = $options->retries;
 
         do {
+            $this->ensureDeadline($options);
             $attempt++;
 
             try {
@@ -441,7 +454,7 @@ final class AsyncHttpClient
 
                     if ($this->shouldRetry($request, $exception)) {
                         $response->close();
-                        $this->sleepRetryDelay($request, $attempt);
+                        $this->sleepRetryDelay($request, $attempt, $options);
                         continue;
                     }
                 }
@@ -452,7 +465,7 @@ final class AsyncHttpClient
                     throw $exception;
                 }
 
-                $this->sleepRetryDelay($request, $attempt);
+                $this->sleepRetryDelay($request, $attempt, $options);
             }
         } while (true);
     }
@@ -467,24 +480,31 @@ final class AsyncHttpClient
         return static fn (SseEvent $event): bool => trim($event->data()) === $marker;
     }
 
-    private function sleepRetryDelay(Request $request, int $attempt): void
+    private function sleepRetryDelay(Request $request, int $attempt, ?RequestOptions $options = null): void
     {
-        $options = $request->options ?? $this->options;
+        $options ??= $request->options ?? $this->options;
         $delayMs = $options->retryDelayMs;
         if ($options->exponentialBackoff) {
             $delayMs *= 2 ** ($attempt - 1);
         }
 
+        if ($options->totalDeadlineNs !== null) {
+            $remainingMs = max(0, (int) (($options->totalDeadlineNs - hrtime(true)) / 1_000_000));
+            $delayMs = min($delayMs, $remainingMs);
+        }
         $this->loop->sleep($delayMs / 1000);
+        $this->ensureDeadline($options);
     }
 
     private function sendWithRetries(Request $request): Response
     {
         $attempt = 0;
         $options = $request->options ?? $this->options;
+        $options = $options->withTotalDeadlineNs($options->totalDeadlineNs ?? hrtime(true) + (int) ($options->totalTimeout * 1_000_000_000));
         $maxAttempts = $options->retries;
 
         do {
+            $this->ensureDeadline($options);
             $attempt++;
 
             try {
@@ -498,7 +518,7 @@ final class AsyncHttpClient
                     );
 
                     if ($this->shouldRetry($request, $exception)) {
-                        $this->sleepRetryDelay($request, $attempt);
+                        $this->sleepRetryDelay($request, $attempt, $options);
                         continue;
                     }
                 }
@@ -509,9 +529,16 @@ final class AsyncHttpClient
                     throw $exception;
                 }
 
-                $this->sleepRetryDelay($request, $attempt);
+                $this->sleepRetryDelay($request, $attempt, $options);
             }
         } while (true);
+    }
+
+    private function ensureDeadline(RequestOptions $options): void
+    {
+        if ($options->totalDeadlineNs !== null && hrtime(true) >= $options->totalDeadlineNs) {
+            throw new TimeoutException('Total request timeout exceeded');
+        }
     }
 
     private function shouldRetry(Request $request, HttpException $exception): bool

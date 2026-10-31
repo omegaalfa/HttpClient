@@ -148,7 +148,7 @@ final class AsyncHttpClientIntegrationTest extends TestCase
             ->withBearerToken('secret-token')
             ->withHeader('Cookie', 'manual=1');
 
-        // 127.0.0.1 -> localhost: mesma máquina, hosts diferentes => cross-origin.
+        // 127.0.0.1 -> 127.0.0.2: loopback local, mas origem diferente.
         $response = await($client->get(self::$server->baseUrl() . '/redirect-cross-host'));
         $data = $response->json();
 

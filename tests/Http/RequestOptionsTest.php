@@ -139,4 +139,17 @@ final class RequestOptionsTest extends TestCase
         self::assertSame(4.5, $options->writeTimeout);
         self::assertSame(5.5, $options->totalTimeout);
     }
+
+    public function testRedirectSecurityOptionsAreImmutable(): void
+    {
+        $base = new RequestOptions();
+        $changed = $base
+            ->withAllowInsecureRedirects()
+            ->withSensitiveHeaders(['X-Api-Key', 'X-Internal-Token']);
+
+        self::assertFalse($base->allowInsecureRedirects);
+        self::assertSame([], $base->sensitiveHeaders);
+        self::assertTrue($changed->allowInsecureRedirects);
+        self::assertSame(['x-api-key', 'x-internal-token'], $changed->sensitiveHeaders);
+    }
 }

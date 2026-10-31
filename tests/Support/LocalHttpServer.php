@@ -17,7 +17,7 @@ final class LocalHttpServer
 
     private string $host;
 
-    public function __construct(string $host = '127.0.0.1')
+    public function __construct(string $host = '127.0.0.1', private readonly string $listenHost = '0.0.0.0')
     {
         $this->host = $host;
         $this->port = $this->reservePort();
@@ -34,7 +34,7 @@ final class LocalHttpServer
             $phpBinary,
             '-n',
             '-S',
-            sprintf('%s:%d', $this->host, $this->port),
+            sprintf('%s:%d', $this->listenHost, $this->port),
             $routerPath,
         ];
 

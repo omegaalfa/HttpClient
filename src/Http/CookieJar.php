@@ -61,6 +61,7 @@ final class CookieJar
             $domain = '';
             $path = '/';
             $expires = null;
+            $maxAge = null;
             $secure = false;
             $httpOnly = false;
             $hasDomainAttribute = false;
@@ -80,6 +81,10 @@ final class CookieJar
                     } elseif ($key === 'expires') {
                         $timestamp = strtotime($attributeValue);
                         $expires = $timestamp === false ? null : $timestamp;
+                    } elseif ($key === 'max-age') {
+                        if ($this->isIntegerString($attributeValue)) {
+                            $maxAge = (int) $attributeValue;
+                        }
                     }
                 } else {
                     $flag = strtolower($part);
@@ -97,6 +102,13 @@ final class CookieJar
             } elseif (!self::domainMatches($originHost, $domain)) {
                 // Domain não é parent do host de origem — rejeita o cookie (RFC 6265 §5.3.6).
                 continue;
+            }
+
+            if ($maxAge !== null) {
+                $now = time();
+                $expires = $maxAge <= 0
+                    ? $now - 1
+                    : ($maxAge > PHP_INT_MAX - $now ? PHP_INT_MAX : $now + $maxAge);
             }
 
             $this->set($name, $value, $domain, $path, $expires, $secure, $httpOnly, !$hasDomainAttribute);
@@ -184,5 +196,27 @@ final class CookieJar
 
         return str_ends_with($cookiePath, '/')
             || ($requestPath[strlen($cookiePath)] ?? '') === '/';
+    }
+
+    private function isIntegerString(string $value): bool
+    {
+        $length = strlen($value);
+        if ($length === 0) {
+            return false;
+        }
+
+        $start = $value[0] === '-' ? 1 : 0;
+        if ($start === $length) {
+            return false;
+        }
+
+        for ($i = $start; $i < $length; $i++) {
+            $byte = ord($value[$i]);
+            if ($byte < 48 || $byte > 57) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

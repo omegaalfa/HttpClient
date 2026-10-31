@@ -83,6 +83,18 @@ final class HeadersTest extends TestCase
         self::assertSame(['a=1', 'b=2'], $headers->values('set-cookie'));
     }
 
+    public function testFromRawRejectsMalformedHeaderLines(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Headers::fromRaw("HTTP/1.1 200 OK\r\nBroken-Header\r\n");
+    }
+
+    public function testFromRawRejectsWhitespaceBeforeHeaderColon(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Headers::fromRaw("HTTP/1.1 200 OK\r\nX-Test : value\r\n");
+    }
+
     public function testToArrayAndToLinesReturnExpectedFormat(): void
     {
         $headers = new Headers([
@@ -146,5 +158,21 @@ final class HeadersTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
 
         new Headers(['X-Test' => "a\nb"]);
+    }
+
+    public function testHeaderNamesMustUseHttpTokenCharacters(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new Headers(['Bad Header' => 'value']);
+    }
+
+    public function testHeaderValuesRejectControlBytesExceptHorizontalTab(): void
+    {
+        $headers = new Headers(['X-Tab' => "left\tright"]);
+        self::assertSame("left\tright", $headers->get('X-Tab'));
+
+        $this->expectException(InvalidArgumentException::class);
+        new Headers(['X-Control' => "bad\x01value"]);
     }
 }

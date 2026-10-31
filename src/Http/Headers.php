@@ -47,13 +47,22 @@ final class Headers implements Countable, IteratorAggregate
             ? explode("\r\n", $rawHeaders)
             : (preg_split('/\r\n|\n|\r/', $rawHeaders) ?: []);
 
+        $firstLine = true;
         foreach ($lines as $line) {
             if (!str_contains($line, ':')) {
+                if ($firstLine && str_starts_with($line, 'HTTP/')) {
+                    $firstLine = false;
+                    continue;
+                }
+                if ($line !== '') {
+                    throw new InvalidArgumentException('Malformed HTTP header line');
+                }
                 continue;
             }
 
             [$name, $value] = explode(':', $line, 2);
-            $headers->add(trim($name), trim($value));
+            $headers->add($name, trim($value));
+            $firstLine = false;
         }
 
         return $headers;
@@ -189,8 +198,22 @@ final class Headers implements Countable, IteratorAggregate
 
     private function assertNoControlChars(string $text, string $subject): void
     {
-        if (preg_match('/[\r\n\0]/', $text) === 1) {
-            throw new InvalidArgumentException("{$subject} must not contain CR, LF or NUL characters");
+        $length = strlen($text);
+        if ($subject === 'Header name' && $length === 0) {
+            throw new InvalidArgumentException('Header name must not be empty');
+        }
+
+        if ($subject === 'Header name') {
+            $tokenCharacters = "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+            if (strspn($text, $tokenCharacters) !== $length) {
+                throw new InvalidArgumentException('Header name contains an invalid character');
+            }
+            return;
+        }
+
+        // HTAB and obs-text are allowed; other CTLs can confuse parsers.
+        if (preg_match('/[\x00-\x08\x0A-\x1F\x7F]/', $text) === 1) {
+            throw new InvalidArgumentException('Header value contains a control character');
         }
     }
 }

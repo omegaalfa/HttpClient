@@ -43,11 +43,12 @@ final class SocketTransportTest extends TestCase
     public function testBuildRedirectedRequestStripsCredentialsOnCrossOrigin(): void
     {
         $transport = new SocketTransport(new FiberEventLoop());
-        $options = (new RequestOptions())->withBearerToken('secret')->withBasicAuth('user', 'pass');
+        $options = (new RequestOptions())->withBearerToken('secret')->withBasicAuth('user', 'pass')->withSensitiveHeaders(['X-Api-Key']);
         $request = new Request('GET', 'https://a.example.com/x', new Headers([
             'Authorization' => 'Bearer manual',
             'Cookie' => 'sid=1',
             'X-Keep' => 'yes',
+            'X-Api-Key' => 'secret-key',
         ]), null, [], [], null, $options);
 
         $redirected = $this->invokePrivate(
@@ -63,8 +64,29 @@ final class SocketTransportTest extends TestCase
         self::assertNull($redirected->headers->get('Authorization'));
         self::assertNull($redirected->headers->get('Cookie'));
         self::assertSame('yes', $redirected->headers->get('X-Keep'));
+        self::assertNull($redirected->headers->get('X-Api-Key'));
         self::assertNull($redirected->options?->bearerToken);
         self::assertNull($redirected->options?->basicAuth);
+    }
+
+    public function testBuildRedirectedRequestBlocksHttpsDowngradeByDefault(): void
+    {
+        $transport = new SocketTransport(new FiberEventLoop());
+        $options = new RequestOptions();
+        $request = new Request('GET', 'https://api.example.com/', new Headers(), null, [], [], null, $options);
+
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessage('Refusing HTTPS to HTTP redirect');
+        $this->invokePrivate($transport, 'buildRedirectedRequest', $request, $options, 'https://api.example.com/', 'http://api.example.com/', 302);
+    }
+
+    public function testPoolKeySeparatesVerifiedAndUnverifiedTlsConnections(): void
+    {
+        $transport = new SocketTransport(new FiberEventLoop());
+        $verified = $this->invokePrivate($transport, 'connectionPoolKey', 'https', 'api.example.com', 443, new RequestOptions());
+        $unverified = $this->invokePrivate($transport, 'connectionPoolKey', 'https', 'api.example.com', 443, (new RequestOptions())->withVerifySSL(false));
+
+        self::assertNotSame($verified, $unverified);
     }
 
     public function testBuildRedirectedRequestKeepsCredentialsOnSameOrigin(): void
@@ -326,6 +348,48 @@ final class SocketTransportTest extends TestCase
         self::assertSame(200, $status);
         self::assertSame('ok', $headers->get('X-Test'));
         self::assertSame('hello', $body);
+    }
+
+    public function testReadResponseSkipsInformationalResponseBeforeFinalResponse(): void
+    {
+        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        self::assertNotFalse($sockets);
+        [$readSocket, $writeSocket] = $sockets;
+        fwrite($writeSocket, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        fclose($writeSocket);
+
+        $transport = new SocketTransport(new FiberEventLoop());
+        [$status, , $body] = $this->invokePrivate($transport, 'readResponse', $readSocket, (new RequestOptions())->withReadTimeout(1.0)->withTotalTimeout(1.0));
+        fclose($readSocket);
+
+        self::assertSame(200, $status);
+        self::assertSame('ok', $body);
+    }
+
+    public function testReadResponseRejectsAmbiguousContentLengthAndTransferEncoding(): void
+    {
+        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        self::assertNotFalse($sockets);
+        [$readSocket, $writeSocket] = $sockets;
+        fwrite($writeSocket, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+        fclose($writeSocket);
+
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessage('Ambiguous response framing');
+        try {
+            $this->invokePrivate(new SocketTransport(new FiberEventLoop()), 'readResponse', $readSocket, new RequestOptions());
+        } finally {
+            fclose($readSocket);
+        }
+    }
+
+    public function testReadResponseAcceptsIdenticalRepeatedContentLength(): void
+    {
+        $headers = new Headers();
+        $headers->add('Content-Length', '2');
+        $headers->add('Content-Length', '2');
+
+        self::assertSame([2, false], $this->invokePrivate(new SocketTransport(new FiberEventLoop()), 'parseResponseFraming', $headers));
     }
 
     public function testReadResponseParsesChunkedResponse(): void
