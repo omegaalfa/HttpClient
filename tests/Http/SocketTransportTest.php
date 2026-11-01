@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Omegaalfa\HttpClient\Http;
 
-use Omegaalfa\FiberEventLoop\FiberEventLoop;
+use Omegaalfa\HttpClient\Loop\Loop;
 use Omegaalfa\HttpClient\Http\Exceptions\ConnectionException;
 use Omegaalfa\HttpClient\Http\CookieJar;
 use Omegaalfa\HttpClient\Http\Headers;
@@ -18,7 +18,7 @@ final class SocketTransportTest extends TestCase
 {
     public function testIsRedirectRecognizesSupportedStatusCodes(): void
     {
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
 
         self::assertTrue($this->invokePrivate($transport, 'isRedirect', 301));
         self::assertTrue($this->invokePrivate($transport, 'isRedirect', 308));
@@ -28,7 +28,7 @@ final class SocketTransportTest extends TestCase
 
     public function testResolveRedirectUrlVariants(): void
     {
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
 
         $absolute = $this->invokePrivate($transport, 'resolveRedirectUrl', 'https://a.com/x', 'https://b.com/y');
         self::assertSame('https://b.com/y', $absolute);
@@ -46,7 +46,7 @@ final class SocketTransportTest extends TestCase
 
     public function testBuildRedirectedRequestStripsCredentialsOnCrossOrigin(): void
     {
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())->withBearerToken('secret')->withBasicAuth('user', 'pass')->withSensitiveHeaders(['X-Api-Key']);
         $request = new Request('GET', 'https://a.example.com/x', new Headers([
             'Authorization' => 'Bearer manual',
@@ -75,7 +75,7 @@ final class SocketTransportTest extends TestCase
 
     public function testBuildRedirectedRequestBlocksHttpsDowngradeByDefault(): void
     {
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = new RequestOptions();
         $request = new Request('GET', 'https://api.example.com/', new Headers(), null, [], [], null, $options);
 
@@ -86,7 +86,7 @@ final class SocketTransportTest extends TestCase
 
     public function testPoolKeySeparatesVerifiedAndUnverifiedTlsConnections(): void
     {
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $verified = $this->invokePrivate($transport, 'connectionPoolKey', 'https', 'api.example.com', 443, new RequestOptions());
         $unverified = $this->invokePrivate($transport, 'connectionPoolKey', 'https', 'api.example.com', 443, (new RequestOptions())->withVerifySSL(false));
 
@@ -95,7 +95,7 @@ final class SocketTransportTest extends TestCase
 
     public function testBuildRedirectedRequestKeepsCredentialsOnSameOrigin(): void
     {
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())->withBearerToken('secret');
         $request = new Request('GET', 'https://a.example.com/x', new Headers([
             'Authorization' => 'Bearer manual',
@@ -119,7 +119,7 @@ final class SocketTransportTest extends TestCase
 
     public function testRedirectDoesNotReplayOriginalQueryAndKeepsHeadMethod(): void
     {
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = new RequestOptions();
         $head = new Request('HEAD', 'https://api.example.com/dir/file', new Headers(), null, ['token' => 'old'], [], null, $options);
 
@@ -140,7 +140,7 @@ final class SocketTransportTest extends TestCase
 
     public function testBuildRedirectedRequestStripsCredentialsWhenOnlyPortChanges(): void
     {
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())->withBearerToken('secret');
         $request = new Request('GET', 'https://a.example.com:8443/x', new Headers([
             'Authorization' => 'Bearer manual',
@@ -193,7 +193,7 @@ final class SocketTransportTest extends TestCase
             $options
         );
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $prepared = $this->invokePrivate($transport, 'prepareRequest', $request, $options);
 
         self::assertSame('https://api.example.com/items?page=1', $prepared['url']);
@@ -214,7 +214,7 @@ final class SocketTransportTest extends TestCase
         $options = new RequestOptions();
         $request = new Request('GET', 'http://example.com:8080/items', new Headers(), null, [], [], null, $options);
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $prepared = $this->invokePrivate($transport, 'prepareRequest', $request, $options);
 
         self::assertSame('example.com:8080', $prepared['headers']->get('Host'));
@@ -225,7 +225,7 @@ final class SocketTransportTest extends TestCase
         $options = new RequestOptions();
         $request = new Request('GET', 'https://example.com:443/items', new Headers(), null, [], [], null, $options);
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $prepared = $this->invokePrivate($transport, 'prepareRequest', $request, $options);
 
         self::assertSame('example.com', $prepared['headers']->get('Host'));
@@ -245,7 +245,7 @@ final class SocketTransportTest extends TestCase
             $options
         );
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $prepared = $this->invokePrivate($transport, 'prepareRequest', $request, $options);
 
         self::assertSame('grant_type=client_credentials&scope=read', $prepared['body']);
@@ -264,7 +264,7 @@ final class SocketTransportTest extends TestCase
             null,
             $options
         );
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $prepared = $this->invokePrivate($transport, 'prepareRequest', $request, $options);
 
         self::assertSame('scope=read+write', $prepared['body']);
@@ -283,7 +283,7 @@ final class SocketTransportTest extends TestCase
         [$readSocket, $writeSocket] = $sockets;
 
         fwrite($writeSocket, "HTTP/1.1 200 OK\r\nX-Large: " . str_repeat('a', 65_540));
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
 
         try {
             $this->expectException(ConnectionException::class);
@@ -314,7 +314,7 @@ final class SocketTransportTest extends TestCase
                 $options
             );
 
-            $transport = new SocketTransport(new FiberEventLoop());
+            $transport = new SocketTransport(Loop::get());
             $prepared = $this->invokePrivate($transport, 'prepareRequest', $request, $options);
 
             self::assertStringContainsString('multipart/form-data; boundary=', (string) $prepared['headers']->get('Content-Type'));
@@ -338,7 +338,7 @@ final class SocketTransportTest extends TestCase
 
     public function testPrepareRequestSendsAcceptEncodingOnlyWhenCompressionEnabled(): void
     {
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
 
         $default = new RequestOptions();
         $prepared = $this->invokePrivate(
@@ -366,7 +366,7 @@ final class SocketTransportTest extends TestCase
             'Accept-Encoding' => 'identity',
         ]), null, [], [], null, $options);
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $prepared = $this->invokePrivate($transport, 'prepareRequest', $request, $options);
 
         self::assertSame('identity', $prepared['headers']->get('Accept-Encoding'));
@@ -374,7 +374,7 @@ final class SocketTransportTest extends TestCase
 
     public function testBuildRequestPayloadFormatsStartLineHeadersAndBody(): void
     {
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $headers = new Headers([
             'Host' => 'example.com',
             'Content-Type' => 'application/json',
@@ -405,7 +405,7 @@ final class SocketTransportTest extends TestCase
         fwrite($writeSocket, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Test: ok\r\n\r\nhello");
         fclose($writeSocket);
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())
             ->withReadTimeout(1.0)
             ->withTotalTimeout(1.0);
@@ -427,7 +427,7 @@ final class SocketTransportTest extends TestCase
         fwrite($writeSocket, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
         fclose($writeSocket);
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         [$status, , $body] = $this->invokePrivate($transport, 'readResponse', $readSocket, (new RequestOptions())->withReadTimeout(1.0)->withTotalTimeout(1.0));
         fclose($readSocket);
 
@@ -446,7 +446,7 @@ final class SocketTransportTest extends TestCase
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Ambiguous response framing');
         try {
-            $this->invokePrivate(new SocketTransport(new FiberEventLoop()), 'readResponse', $readSocket, new RequestOptions());
+            $this->invokePrivate(new SocketTransport(Loop::get()), 'readResponse', $readSocket, new RequestOptions());
         } finally {
             fclose($readSocket);
         }
@@ -458,7 +458,7 @@ final class SocketTransportTest extends TestCase
         $headers->add('Content-Length', '2');
         $headers->add('Content-Length', '2');
 
-        self::assertSame([2, false], $this->invokePrivate(new SocketTransport(new FiberEventLoop()), 'parseResponseFraming', $headers));
+        self::assertSame([2, false], $this->invokePrivate(new SocketTransport(Loop::get()), 'parseResponseFraming', $headers));
     }
 
     public function testReadResponseParsesChunkedResponse(): void
@@ -474,7 +474,7 @@ final class SocketTransportTest extends TestCase
         );
         fclose($writeSocket);
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())
             ->withReadTimeout(1.0)
             ->withTotalTimeout(1.0);
@@ -501,7 +501,7 @@ final class SocketTransportTest extends TestCase
         );
         fclose($writeSocket);
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())
             ->withReadTimeout(1.0)
             ->withTotalTimeout(1.0);
@@ -527,7 +527,7 @@ final class SocketTransportTest extends TestCase
         self::assertSame(strlen($response), fwrite($writeSocket, $response));
         fclose($writeSocket);
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())
             ->withReadTimeout(1.0)
             ->withTotalTimeout(2.0);
@@ -552,7 +552,7 @@ final class SocketTransportTest extends TestCase
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Incomplete HTTP response body');
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())
             ->withReadTimeout(1.0)
             ->withTotalTimeout(1.0);
@@ -575,7 +575,7 @@ final class SocketTransportTest extends TestCase
         // keeps the connection open, so only an immediate no-body return works.
         fwrite($writeSocket, "HTTP/1.1 200 OK\r\nContent-Length: 1234\r\nX-Test: ok\r\n\r\n");
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())
             ->withReadTimeout(0.2)
             ->withTotalTimeout(1.0);
@@ -599,7 +599,7 @@ final class SocketTransportTest extends TestCase
 
         fwrite($writeSocket, "HTTP/1.1 204 No Content\r\nX-Test: ok\r\n\r\n");
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())
             ->withReadTimeout(0.2)
             ->withTotalTimeout(1.0);
@@ -624,7 +624,7 @@ final class SocketTransportTest extends TestCase
         // 304 may carry Content-Length/Transfer-Encoding describing the GET entity.
         fwrite($writeSocket, "HTTP/1.1 304 Not Modified\r\nContent-Length: 1234\r\nTransfer-Encoding: chunked\r\n\r\n");
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())
             ->withReadTimeout(0.2)
             ->withTotalTimeout(1.0);
@@ -647,7 +647,7 @@ final class SocketTransportTest extends TestCase
 
         fwrite($writeSocket, "HTTP/1.1 200 OK\r\nContent-Length: 1234\r\nX-Test: ok\r\n\r\n");
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())
             ->withReadTimeout(0.2)
             ->withTotalTimeout(1.0);
@@ -682,7 +682,7 @@ final class SocketTransportTest extends TestCase
         fwrite($writeSocket, 'HTTP/1.1 200 OK' . "\r\nContent-Encoding: gzip\r\nContent-Length: " . strlen($payload) . "\r\n\r\n" . $payload);
         fclose($writeSocket);
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())
             ->withReadTimeout(1.0)
             ->withTotalTimeout(1.0);
@@ -708,7 +708,7 @@ final class SocketTransportTest extends TestCase
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Unsupported Content-Encoding: br');
 
-        $transport = new SocketTransport(new FiberEventLoop());
+        $transport = new SocketTransport(Loop::get());
         $options = (new RequestOptions())
             ->withReadTimeout(1.0)
             ->withTotalTimeout(1.0);

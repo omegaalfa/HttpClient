@@ -4,15 +4,15 @@ declare(strict_types=1);
 
 namespace Omegaalfa\HttpClient\Http;
 
-use Omegaalfa\FiberEventLoop\FiberEventLoop;
-use Omegaalfa\FiberEventLoop\Future;
+use Omegaalfa\HttpClient\Loop\Loop;
+use Omegaalfa\HttpClient\Loop\Task;
 use Omegaalfa\HttpClient\Http\Exceptions\ConnectionException;
 use Omegaalfa\HttpClient\Http\Exceptions\HttpException;
 use Omegaalfa\HttpClient\Http\Exceptions\TimeoutException;
 
 final class AsyncHttpClient
 {
-    private FiberEventLoop $loop;
+    private Loop $loop;
 
     private RequestOptions $options;
 
@@ -23,12 +23,12 @@ final class AsyncHttpClient
     private TransportInterface $transport;
 
     public function __construct(
-        ?FiberEventLoop $loop = null,
-        ?RequestOptions $options = null,
-        ?ConnectionPool $connectionPool = null,
+        ?Loop               $loop = null,
+        ?RequestOptions     $options = null,
+        ?ConnectionPool     $connectionPool = null,
         ?TransportInterface $transport = null
     ) {
-        $this->loop = $loop ?? new HttpClientEventLoop();
+        $this->loop = $loop ?? Loop::get();
         $this->options = $options ?? new RequestOptions();
         $this->connectionPool = $connectionPool ?? new ConnectionPool();
         $this->transport = $transport ?? new SocketTransport($this->loop, $this->connectionPool);
@@ -39,7 +39,7 @@ final class AsyncHttpClient
      * @param array<string, mixed> $query
      * @param array<string, string|list<string>> $headers
      */
-    public function get(string $url, array $query = [], array $headers = []): Future
+    public function get(string $url, array $query = [], array $headers = []): Task
     {
         return $this->request('GET', $url, query: $query, headers: $headers);
     }
@@ -48,7 +48,7 @@ final class AsyncHttpClient
      * @param array<string, mixed> $query
      * @param array<string, string|list<string>> $headers
      */
-    public function head(string $url, array $query = [], array $headers = []): Future
+    public function head(string $url, array $query = [], array $headers = []): Task
     {
         return $this->request('HEAD', $url, query: $query, headers: $headers);
     }
@@ -57,7 +57,7 @@ final class AsyncHttpClient
      * @param array<string, string|list<string>> $headers
      * @param array<string, string> $files
      */
-    public function post(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+    public function post(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
     {
         return $this->request('POST', $url, headers: $headers, body: $body, files: $files, multipart: $multipart);
     }
@@ -66,7 +66,7 @@ final class AsyncHttpClient
      * @param array<string, string|list<string>> $headers
      * @param array<string, string> $files
      */
-    public function put(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+    public function put(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
     {
         return $this->request('PUT', $url, headers: $headers, body: $body, files: $files, multipart: $multipart);
     }
@@ -75,7 +75,7 @@ final class AsyncHttpClient
      * @param array<string, string|list<string>> $headers
      * @param array<string, string> $files
      */
-    public function patch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+    public function patch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
     {
         return $this->request('PATCH', $url, headers: $headers, body: $body, files: $files, multipart: $multipart);
     }
@@ -84,7 +84,7 @@ final class AsyncHttpClient
      * @param array<string, mixed> $query
      * @param array<string, string|list<string>> $headers
      */
-    public function delete(string $url, array $query = [], array $headers = []): Future
+    public function delete(string $url, array $query = [], array $headers = []): Task
     {
         return $this->request('DELETE', $url, query: $query, headers: $headers);
     }
@@ -102,7 +102,7 @@ final class AsyncHttpClient
         mixed             $body = null,
         array             $files = [],
         ?MultipartBuilder $multipart = null
-    ): Future {
+    ): Task {
         $request = new Request(
             strtoupper($method),
             $this->resolveUrl($url),
@@ -116,14 +116,14 @@ final class AsyncHttpClient
             $this->options
         );
 
-        return $this->loop->async(fn () => $this->sendWithRetries($request));
+        return new Task(fn () => $this->sendWithRetries($request));
     }
 
     /**
      * @param array<string, mixed> $query
      * @param array<string, string|list<string>> $headers
      */
-    public function streamGet(string $url, array $query = [], array $headers = []): Future
+    public function streamGet(string $url, array $query = [], array $headers = []): Task
     {
         return $this->streamRequest('GET', $url, query: $query, headers: $headers);
     }
@@ -132,7 +132,7 @@ final class AsyncHttpClient
      * @param array<string, string|list<string>> $headers
      * @param array<string, string> $files
      */
-    public function streamPost(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+    public function streamPost(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
     {
         return $this->streamRequest('POST', $url, headers: $headers, body: $body, files: $files, multipart: $multipart);
     }
@@ -141,7 +141,7 @@ final class AsyncHttpClient
      * @param array<string, string|list<string>> $headers
      * @param array<string, string> $files
      */
-    public function streamPut(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+    public function streamPut(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
     {
         return $this->streamRequest('PUT', $url, headers: $headers, body: $body, files: $files, multipart: $multipart);
     }
@@ -150,7 +150,7 @@ final class AsyncHttpClient
      * @param array<string, string|list<string>> $headers
      * @param array<string, string> $files
      */
-    public function streamPatch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
+    public function streamPatch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
     {
         return $this->streamRequest('PATCH', $url, headers: $headers, body: $body, files: $files, multipart: $multipart);
     }
@@ -159,7 +159,7 @@ final class AsyncHttpClient
      * @param array<string, mixed> $query
      * @param array<string, string|list<string>> $headers
      */
-    public function streamDelete(string $url, array $query = [], array $headers = []): Future
+    public function streamDelete(string $url, array $query = [], array $headers = []): Task
     {
         return $this->streamRequest('DELETE', $url, query: $query, headers: $headers);
     }
@@ -177,7 +177,7 @@ final class AsyncHttpClient
         mixed             $body = null,
         array             $files = [],
         ?MultipartBuilder $multipart = null
-    ): Future {
+    ): Task {
         $request = new Request(
             strtoupper($method),
             $this->resolveUrl($url),
@@ -189,7 +189,7 @@ final class AsyncHttpClient
             $this->options
         );
 
-        return $this->loop->async(fn () => $this->sendStreamWithRetries($request));
+        return new Task(fn () => $this->sendStreamWithRetries($request));
     }
 
     /**
@@ -202,7 +202,7 @@ final class AsyncHttpClient
         array     $headers = [],
         bool      $requireDone = false,
         ?callable $completionDetector = null
-    ): Future {
+    ): Task {
         return $this->streamSseRequest(
             'GET',
             url: $url,
@@ -220,7 +220,7 @@ final class AsyncHttpClient
         array     $headers = [],
         bool      $requireDone = false,
         ?callable $completionDetector = null,
-    ): Future {
+    ): Task {
         return $this->streamSseRequest(
             'POST',
             $url,
@@ -246,7 +246,7 @@ final class AsyncHttpClient
         ?MultipartBuilder $multipart = null,
         bool              $requireDone = false,
         ?callable         $completionDetector = null
-    ): Future {
+    ): Task {
         $request = new Request(
             strtoupper($method),
             $this->resolveUrl($url),
@@ -258,35 +258,35 @@ final class AsyncHttpClient
             $this->options
         );
 
-        return $this->loop->async(fn () => $this->sendSseStreamWithRetries($request, $requireDone, $completionDetector));
+        return new Task(fn () => $this->sendSseStreamWithRetries($request, $requireDone, $completionDetector));
     }
 
     /** @param array<array-key, callable(): mixed> $tasks */
-    public function concurrent(array $tasks): Future
+    public function concurrent(array $tasks): Task
     {
         return $this->concurrentExecutor->named($tasks);
     }
 
-    /** @param array<array-key, Future> $futures */
-    public function parallel(array $futures): Future
+    /** @param array<array-key, Task> $futures */
+    public function parallel(array $futures): Task
     {
         return $this->concurrentExecutor->all($futures);
     }
 
-    /** @param array<array-key, Future> $futures */
-    public function awaitAny(array $futures): Future
+    /** @param array<array-key, Task> $futures */
+    public function awaitAny(array $futures): Task
     {
         return $this->concurrentExecutor->any($futures);
     }
 
-    /** @param array<array-key, Future> $futures */
-    public function race(array $futures): Future
+    /** @param array<array-key, Task> $futures */
+    public function race(array $futures): Task
     {
         return $this->concurrentExecutor->race($futures);
     }
 
-    /** @param array<array-key, Future> $futures */
-    public function settled(array $futures): Future
+    /** @param array<array-key, Task> $futures */
+    public function settled(array $futures): Task
     {
         return $this->concurrentExecutor->settled($futures);
     }
@@ -445,16 +445,16 @@ final class AsyncHttpClient
             throw new \InvalidArgumentException('baseUrl must be an absolute URI with a scheme and host');
         }
 
-        $scheme = (string) $base['scheme'];
+        $scheme = (string)$base['scheme'];
         $authorityParts = $base;
 
         if (isset($reference['host'])) {
             $authorityParts = $reference;
-            $path = self::removeDotSegments((string) ($reference['path'] ?? ''));
+            $path = self::removeDotSegments((string)($reference['path'] ?? ''));
             $query = $reference['query'] ?? null;
         } else {
-            $basePath = (string) ($base['path'] ?? '');
-            $referencePath = (string) ($reference['path'] ?? '');
+            $basePath = (string)($base['path'] ?? '');
+            $referencePath = (string)($reference['path'] ?? '');
 
             if ($referencePath === '') {
                 $path = $basePath;
@@ -494,7 +494,7 @@ final class AsyncHttpClient
             $authority .= '@';
         }
 
-        $authority .= (string) $parts['host'];
+        $authority .= (string)$parts['host'];
         if (isset($parts['port'])) {
             $authority .= ':' . $parts['port'];
         }
@@ -502,6 +502,11 @@ final class AsyncHttpClient
         return $authority;
     }
 
+    /**
+     * @param string $basePath
+     * @param string $referencePath
+     * @return string
+     */
     private static function mergeUriPaths(string $basePath, string $referencePath): string
     {
         if ($basePath === '') {
@@ -512,6 +517,10 @@ final class AsyncHttpClient
         return ($lastSlash === false ? '' : substr($basePath, 0, $lastSlash + 1)) . $referencePath;
     }
 
+    /**
+     * @param string $path
+     * @return string
+     */
     private static function removeDotSegments(string $path): string
     {
         $input = $path;
@@ -549,11 +558,16 @@ final class AsyncHttpClient
         return $output;
     }
 
+    /**
+     * @param Request $request
+     * @return StreamResponse
+     * @throws \Throwable
+     */
     private function sendStreamWithRetries(Request $request): StreamResponse
     {
         $attempt = 0;
         $options = $request->options ?? $this->options;
-        $options = $options->withTotalDeadlineNs($options->totalDeadlineNs ?? hrtime(true) + (int) ($options->totalTimeout * 1_000_000_000));
+        $options = $options->withTotalDeadlineNs($options->totalDeadlineNs ?? hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
         $maxAttempts = $options->retries;
 
         do {
@@ -587,6 +601,13 @@ final class AsyncHttpClient
         } while (true);
     }
 
+    /**
+     * @param Request $request
+     * @param bool $requireDone
+     * @param callable|null $completionDetector
+     * @return SseStream
+     * @throws \Throwable
+     */
     private function sendSseStreamWithRetries(Request $request, bool $requireDone, ?callable $completionDetector = null): SseStream
     {
         return new SseStream($this->sendStreamWithRetries($request), new SseParser(), $requireDone, $completionDetector);
@@ -597,6 +618,13 @@ final class AsyncHttpClient
         return static fn (SseEvent $event): bool => trim($event->data()) === $marker;
     }
 
+    /**
+     * @param Request $request
+     * @param int $attempt
+     * @param RequestOptions|null $options
+     * @return void
+     * @throws \Throwable
+     */
     private function sleepRetryDelay(Request $request, int $attempt, ?RequestOptions $options = null): void
     {
         $options ??= $request->options ?? $this->options;
@@ -606,18 +634,23 @@ final class AsyncHttpClient
         }
 
         if ($options->totalDeadlineNs !== null) {
-            $remainingMs = max(0, (int) (($options->totalDeadlineNs - hrtime(true)) / 1_000_000));
+            $remainingMs = max(0, (int)(($options->totalDeadlineNs - hrtime(true)) / 1_000_000));
             $delayMs = min($delayMs, $remainingMs);
         }
         $this->loop->sleep($delayMs / 1000);
         $this->ensureDeadline($options);
     }
 
+    /**
+     * @param Request $request
+     * @return Response
+     * @throws \Throwable
+     */
     private function sendWithRetries(Request $request): Response
     {
         $attempt = 0;
         $options = $request->options ?? $this->options;
-        $options = $options->withTotalDeadlineNs($options->totalDeadlineNs ?? hrtime(true) + (int) ($options->totalTimeout * 1_000_000_000));
+        $options = $options->withTotalDeadlineNs($options->totalDeadlineNs ?? hrtime(true) + (int)($options->totalTimeout * 1_000_000_000));
         $maxAttempts = $options->retries;
 
         do {
@@ -658,19 +691,13 @@ final class AsyncHttpClient
         }
     }
 
+    /**
+     * @param Request $request
+     * @param HttpException $exception
+     * @return bool
+     */
     private function shouldRetry(Request $request, HttpException $exception): bool
     {
-        $isIdempotent = in_array($request->method, ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE'], true);
-
-        if ($exception instanceof TimeoutException || $exception instanceof ConnectionException) {
-            return $isIdempotent;
-        }
-
-        $response = $exception->response();
-        if ($response !== null && $response->status() >= 500) {
-            return $isIdempotent;
-        }
-
-        return $isIdempotent;
+        return in_array($request->method, ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE'], true);
     }
 }

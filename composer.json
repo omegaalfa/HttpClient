@@ -1,6 +1,6 @@
 {
   "name": "omegaalfa/http-client",
-  "description": "A lightweight, high-performance asynchronous HTTP client for modern PHP applications powered b FiberEventLoop.",
+  "description": "A lightweight, high-performance asynchronous HTTP client for modern PHP applications powered by its own Fiber event loop.",
   "type": "library",
   "license": "MIT",
   "keywords": [
@@ -24,12 +24,12 @@
     "php": ">=8.4",
     "ext-sockets": "*",
     "ext-openssl": "*",
-    "omegaalfa/fiber-event-loop": "^1.0",
     "jeremykendall/php-domain-parser": "^6.4.0"
   },
   "autoload": {
     "files": [
-      "src/Http/functions.php"
+      "src/Http/functions.php",
+      "src/Loop/functions.php"
     ],
     "psr-4": {
       "Omegaalfa\\HttpClient\\": "src/"
@@ -50,11 +50,11 @@
     "friendsofphp/php-cs-fixer": "^3.95"
   },
   "scripts": {
-    "test": "phpunit -c phpunit.xml.dist",
-    "test-coverage": "phpunit -c phpunit.xml.dist --coverage-html=coverage --coverage-text",
-    "test-verbose": "phpunit -c phpunit.xml.dist --display-all-issues",
-    "test-filter": "phpunit -c phpunit.xml.dist --filter",
-    "test-stop-on-failure": "phpunit -c phpunit.xml.dist --stop-on-failure",
+    "test": "@php -d xdebug.mode=off vendor/bin/phpunit -c phpunit.xml.dist",
+    "test-coverage": "@php -d xdebug.mode=coverage vendor/bin/phpunit -c phpunit.xml.dist --coverage-html=coverage --coverage-text",
+    "test-verbose": "@php -d xdebug.mode=off vendor/bin/phpunit -c phpunit.xml.dist --display-all-issues",
+    "test-filter": "@php -d xdebug.mode=off vendor/bin/phpunit -c phpunit.xml.dist --filter",
+    "test-stop-on-failure": "@php -d xdebug.mode=off vendor/bin/phpunit -c phpunit.xml.dist --stop-on-failure",
     "quality:stan": "phpstan analyse --configuration=phpstan.neon",
     "quality:cs": "php-cs-fixer fix --dry-run --diff --allow-risky=yes --config=.php-cs-fixer.php",
     "quality:mutation": "infection --configuration=infection.json5 --test-framework=phpunit --threads=1 --min-msi=60",

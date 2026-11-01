@@ -14,7 +14,7 @@ final class RequestOptions
         ?Headers $headers = null,
         ?CookieJar $cookieJar = null,
         public ?string $proxy = null,
-        public string $userAgent = 'FiberEventLoop AsyncHttpClient/1.0',
+        public string $userAgent = 'Omegaalfa HttpClient/1.0',
         public bool $sendJson = true,
         public bool $compression = false,
         public ?string $bearerToken = null,

@@ -16,7 +16,7 @@ final class RequestOptionsTest extends TestCase
         $options = new RequestOptions();
 
         self::assertNull($options->baseUrl);
-        self::assertSame('FiberEventLoop AsyncHttpClient/1.0', $options->userAgent);
+        self::assertSame('Omegaalfa HttpClient/1.0', $options->userAgent);
         self::assertTrue($options->sendJson);
         self::assertSame(0, $options->retries);
         self::assertSame(100, $options->retryDelayMs);

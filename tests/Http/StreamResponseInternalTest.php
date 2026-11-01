@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Omegaalfa\HttpClient\Http;
 
-use Omegaalfa\FiberEventLoop\FiberEventLoop;
+use Omegaalfa\HttpClient\Loop\Loop;
 use Omegaalfa\HttpClient\Http\ConnectionPool;
 use Omegaalfa\HttpClient\Http\Headers;
 use Omegaalfa\HttpClient\Http\RequestOptions;
@@ -16,7 +16,7 @@ final class StreamResponseInternalTest extends TestCase
 {
     public function testTotalDeadlineIsPerInstance(): void
     {
-        $loop = new FiberEventLoop();
+        $loop = Loop::get();
         $pool = new ConnectionPool();
         $headers = new Headers();
 
@@ -73,7 +73,7 @@ final class StreamResponseInternalTest extends TestCase
 
     public function testNoBodyStreamCompletesWithoutPeerClose(): void
     {
-        $loop = new FiberEventLoop();
+        $loop = Loop::get();
         $pool = new ConnectionPool();
         $headers = new Headers();
 
@@ -106,7 +106,7 @@ final class StreamResponseInternalTest extends TestCase
 
     public function testChunkedStreamDecodesIncrementally(): void
     {
-        $loop = new FiberEventLoop();
+        $loop = Loop::get();
         $pool = new ConnectionPool();
 
         $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);

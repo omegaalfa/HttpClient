@@ -4,7 +4,12 @@ declare(strict_types=1);
 
 namespace Omegaalfa\HttpClient\Http;
 
-use Omegaalfa\FiberEventLoop\FiberEventLoop;
+use Fiber;
+use Omegaalfa\HttpClient\Loop\IoTimeoutException;
+use Omegaalfa\HttpClient\Loop\Loop;
+use Omegaalfa\HttpClient\Loop\StreamClosedException;
+use Omegaalfa\HttpClient\Loop\StreamSelectException;
+use Omegaalfa\HttpClient\Loop\Task;
 use Omegaalfa\HttpClient\Http\Exceptions\ConnectionException;
 use Omegaalfa\HttpClient\Http\Exceptions\TimeoutException;
 
@@ -17,11 +22,11 @@ final class SocketTransport implements TransportInterface
     private const MAX_RESPONSE_HEADER_BYTES = 65_536;
 
     private const MAX_RESPONSE_HEADER_LINES = 100;
-    private FiberEventLoop $loop;
+    private Loop $loop;
 
     private ConnectionPool $connectionPool;
 
-    public function __construct(FiberEventLoop $loop, ?ConnectionPool $connectionPool = null)
+    public function __construct(Loop $loop, ?ConnectionPool $connectionPool = null)
     {
         $this->loop = $loop;
         $this->connectionPool = $connectionPool ?? new ConnectionPool();
@@ -496,7 +501,6 @@ final class SocketTransport implements TransportInterface
                     throw new ConnectionException('Proxy closed connection during CONNECT handshake');
                 }
 
-                $this->loop->next();
                 continue;
             }
 
@@ -688,7 +692,6 @@ final class SocketTransport implements TransportInterface
                     break;
                 }
 
-                $this->loop->next();
                 continue;
             }
 
@@ -774,7 +777,6 @@ final class SocketTransport implements TransportInterface
                     break;
                 }
 
-                $this->loop->next();
                 continue;
             }
 
@@ -794,6 +796,11 @@ final class SocketTransport implements TransportInterface
      */
     private function waitForSocket($socket, bool $read, bool $write, float $timeoutSeconds, string $message, int $totalDeadlineNs): void
     {
+        if (Fiber::getCurrent() === null) {
+            (new Task(fn () => $this->waitForSocket($socket, $read, $write, $timeoutSeconds, $message, $totalDeadlineNs)))->await();
+            return;
+        }
+
         $deadlineNs = hrtime(true) + (int)($timeoutSeconds * 1_000_000_000);
 
         $this->ensureTotalTimeout($totalDeadlineNs);
@@ -801,47 +808,24 @@ final class SocketTransport implements TransportInterface
             throw new TimeoutException($message);
         }
 
-        $readStreams = $read ? [$socket] : [];
-        $writeStreams = $write ? [$socket] : [];
-        $except = [];
-        $ready = @stream_select($readStreams, $writeStreams, $except, 0, 0);
-        if ($ready === false) {
-            throw new ConnectionException('stream_select failed while waiting for socket readiness');
-        }
-        if ($ready > 0) {
-            return;
+        $remainingSeconds = max(0.0, (min($deadlineNs, $totalDeadlineNs) - hrtime(true)) / 1_000_000_000);
+        try {
+            if ($read) {
+                $this->loop->waitReadable($socket, $remainingSeconds);
+            } elseif ($write) {
+                $this->loop->waitWritable($socket, $remainingSeconds);
+            } else {
+                throw new ConnectionException('Socket wait requires a read or write direction');
+            }
+        } catch (IoTimeoutException $exception) {
+            throw new TimeoutException($message, previous: $exception);
+        } catch (StreamClosedException|StreamSelectException $exception) {
+            throw new ConnectionException('Socket readiness failed', previous: $exception);
         }
 
-        if ($this->loop instanceof SocketReadinessInterface) {
-            $this->loop->awaitStream($socket, $read, $write, min($deadlineNs, $totalDeadlineNs));
-        } else {
-            $this->pollSocketFallback($socket, $read, $write, $deadlineNs, $totalDeadlineNs, $message);
-        }
         $this->ensureTotalTimeout($totalDeadlineNs);
         if (hrtime(true) >= $deadlineNs) {
             throw new TimeoutException($message);
-        }
-    }
-
-    /** @param resource $socket */
-    private function pollSocketFallback($socket, bool $read, bool $write, int $deadlineNs, int $totalDeadlineNs, string $message): void
-    {
-        while (true) {
-            $this->ensureTotalTimeout($totalDeadlineNs);
-            if (hrtime(true) >= $deadlineNs) {
-                throw new TimeoutException($message);
-            }
-            $readStreams = $read ? [$socket] : [];
-            $writeStreams = $write ? [$socket] : [];
-            $except = [];
-            $ready = @stream_select($readStreams, $writeStreams, $except, 0, 0);
-            if ($ready === false) {
-                throw new ConnectionException('stream_select failed while waiting for socket readiness');
-            }
-            if ($ready > 0) {
-                return;
-            }
-            $this->loop->next();
         }
     }
 

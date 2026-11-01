@@ -1,0 +1,11 @@
+# I/O driver contract
+
+`IoDriver` isolates stream multiplexing from task scheduling. A driver registers and removes read/write watches by `(streamId, generation)`, waits for readiness or a monotonic timeout, returns `IoEvent` records, and clears its own references. A generation identifies one exact registration, so a late event cannot resume a replacement or canceled `WaitHandle`.
+
+For task-level deadlines on `waitReadable()` and `waitWritable()`, see [I/O wait timeouts](IO_TIMEOUTS.md). Those deadlines use the Loop timer heap; the driver contract does not change.
+
+The driver does not own Fibers, Tasks, cancellation policy, timers, or stream lifetime. The Loop maps returned events to the currently active handle, validates its generation, and alone resumes or throws into the task Fiber. `clear()` and watch removal release driver references but never close caller-owned streams. A future driver can implement `IoDriver` and be selected on first initialization with `Loop::get($driver)`; Task's API does not depend on the selected driver.
+
+The default `StreamSelectDriver` uses PHP `stream_select()`. It rejects non-stream or already-closed resources at registration. If a stream is closed while watched, it removes that watch and delivers `StreamClosedException` at the waiting operation. Other `stream_select()` failures throw `StreamSelectException`; recognized interrupted-system-call warnings return no event so the Loop can recompute deadlines. Warnings are captured only around the `stream_select()` call; they are not suppressed globally.
+
+`stream_select()` only accepts stream types supported by the PHP build and platform; wrappers such as zlib may not be selectable. On POSIX, builds can impose an `FD_SETSIZE` limit on descriptor numbers; newer PHP source has changes that grow these sets, so the practical limit depends on the deployed PHP version and build. Windows has additional differences: the PHP manual documents that `proc_open()` pipes fail with `stream_select()`, and console `STDIN` readiness does not guarantee a nonblocking read. See the [PHP manual](https://www.php.net/manual/en/function.stream-select.php). This driver targets moderate descriptor counts and portable socket readiness, not as a replacement for `epoll` or `kqueue`. With no watched streams and a timer deadline, it sleeps until the deadline instead of polling.

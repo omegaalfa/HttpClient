@@ -4,7 +4,12 @@ declare(strict_types=1);
 
 namespace Omegaalfa\HttpClient\Http;
 
-use Omegaalfa\FiberEventLoop\FiberEventLoop;
+use Fiber;
+use Omegaalfa\HttpClient\Loop\IoTimeoutException;
+use Omegaalfa\HttpClient\Loop\Loop;
+use Omegaalfa\HttpClient\Loop\StreamClosedException;
+use Omegaalfa\HttpClient\Loop\StreamSelectException;
+use Omegaalfa\HttpClient\Loop\Task;
 use Omegaalfa\HttpClient\Http\Exceptions\ConnectionException;
 use Omegaalfa\HttpClient\Http\Exceptions\TimeoutException;
 use RuntimeException;
@@ -31,7 +36,7 @@ final class StreamResponse
      * @param array<string, mixed> $cookies
      */
     public function __construct(
-        private readonly FiberEventLoop $loop,
+        private readonly Loop $loop,
         private readonly ConnectionPool $connectionPool,
         /** @var resource */
         private $socket,
@@ -213,7 +218,6 @@ final class StreamResponse
                 return;
             }
 
-            $this->loop->next();
             return;
         }
 
@@ -246,7 +250,6 @@ final class StreamResponse
                 $this->chunkedDecoder->finish();
             }
 
-            $this->loop->next();
             return;
         }
 
@@ -262,44 +265,26 @@ final class StreamResponse
             throw new TimeoutException('Read timed out');
         }
 
-        $read = [$this->socket];
-        $write = $except = [];
-        $ready = @stream_select($read, $write, $except, 0, 0);
-        if ($ready === false) {
-            throw new ConnectionException('stream_select failed while waiting for stream data');
-        }
-        if ($ready > 0) {
-            return;
-        }
-
-        if ($this->loop instanceof SocketReadinessInterface) {
-            $this->loop->awaitStream($this->socket, true, false, min($deadlineNs, $this->totalDeadlineNs));
-        } else {
-            $this->pollReadableFallback($deadlineNs);
+        $waitUntil = min($deadlineNs, $this->totalDeadlineNs);
+        $remainingSeconds = max(0.0, ($waitUntil - hrtime(true)) / 1_000_000_000);
+        try {
+            $wait = fn () => $this->loop->waitReadable($this->socket, $remainingSeconds);
+            if (Fiber::getCurrent() === null) {
+                (new Task($wait))->await();
+            } else {
+                $wait();
+            }
+        } catch (IoTimeoutException $exception) {
+            if (hrtime(true) >= $this->totalDeadlineNs) {
+                throw new TimeoutException('Total request timeout exceeded', previous: $exception);
+            }
+            throw new TimeoutException('Read timed out', previous: $exception);
+        } catch (StreamClosedException|StreamSelectException $exception) {
+            throw new ConnectionException('Stream readiness failed', previous: $exception);
         }
         $this->ensureTotalTimeout();
         if (hrtime(true) >= $deadlineNs) {
             throw new TimeoutException('Read timed out');
-        }
-    }
-
-    private function pollReadableFallback(int $deadlineNs): void
-    {
-        while (true) {
-            $this->ensureTotalTimeout();
-            if (hrtime(true) >= $deadlineNs) {
-                throw new TimeoutException('Read timed out');
-            }
-            $read = [$this->socket];
-            $write = $except = [];
-            $ready = @stream_select($read, $write, $except, 0, 0);
-            if ($ready === false) {
-                throw new ConnectionException('stream_select failed while waiting for stream data');
-            }
-            if ($ready > 0) {
-                return;
-            }
-            $this->loop->next();
         }
     }
 

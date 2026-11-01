@@ -1,6 +1,7 @@
 # Omegaalfa HttpClient
 
-Cliente HTTP assíncrono para PHP 8.4 baseado em Fibers e no `FiberEventLoop`.
+Cliente HTTP assíncrono para PHP 8.4 baseado em Fibers e no event loop próprio
+`Omegaalfa\HttpClient\Loop`.
 
 O foco desta biblioteca é oferecer uma API fluente, previsível e extensível para I/O HTTP de alta performance sem depender de Amp, ReactPHP ou outro event loop externo.
 
@@ -8,7 +9,7 @@ O foco desta biblioteca é oferecer uma API fluente, previsível e extensível p
 
 Esta biblioteca fornece:
 
-- Requisições HTTP assíncronas com `Future`
+- Requisições HTTP assíncronas que retornam `Task`
 - Configuração fluente e imutável no cliente
 - JSON automático, query string, headers, cookies, auth, multipart e upload de arquivos
 - Controle de timeout, retries, backoff e redirects
@@ -21,7 +22,7 @@ Esta biblioteca fornece:
 
 - PHP >= 8.4
 - Extensão `ext-sockets`
-- Dependência `omegaalfa/fiber-event-loop`
+- O event loop cooperativo vem incluído no pacote; não há dependência externa de event loop.
 
 ## Instalação
 
@@ -29,8 +30,9 @@ Esta biblioteca fornece:
 composer require omegaalfa/http-client
 ```
 
-> **Nota sobre estabilidade:** enquanto `omegaalfa/fiber-event-loop` estiver disponível apenas como
-> `dev-main`, o projeto consumidor poderá precisar permitir dependências de desenvolvimento em sua configuração do Composer.
+O pacote não requer `omegaalfa/fiber-event-loop`; a implementação usada pelo
+cliente é mantida em `src/Loop` e exposta no namespace
+`Omegaalfa\HttpClient\Loop`.
 
 ## Início rápido
 
@@ -63,10 +65,48 @@ O pacote trabalha com estes blocos:
 - `CookieJar`: armazenamento e envio automático de cookies
 - `MultipartBuilder`: construção de multipart/form-data
 - `ConcurrentExecutor`: primitivas de concorrência
+- `Loop` e `Task`: agendamento cooperativo, timers e readiness de streams
 - `TransportInterface` + `SocketTransport`: fronteira de rede injetável (sockets TCP/TLS, proxy, redirects)
 - `Testing\MockTransport`: transporte de teste para consumidores, sem rede
 - `ConnectionPool`: reuso de sockets por origem
 - `HttpException`, `TimeoutException`, `ConnectionException`: falhas do domínio
+
+Para exemplos passo a passo organizados por tarefa, consulte o
+[Guia de casos de uso](docs/USE_CASES.md). Este README também contém uma
+[referência dos métodos públicos](#referência-da-api).
+
+### Event loop incluído
+
+O cliente usa `Omegaalfa\HttpClient\Loop\Loop`, sem depender de um pacote de
+event loop externo. `Loop::get()` devolve a instância singleton usada pelo
+cliente; os métodos HTTP retornam `Omegaalfa\HttpClient\Loop\Task`.
+
+```php
+use Omegaalfa\HttpClient\Loop\Loop;
+use Omegaalfa\HttpClient\Loop\Task;
+
+$loop = Loop::get();
+$task = new Task(static function (): string {
+    Loop::get()->sleep(0.01);
+    return 'concluído';
+});
+
+echo $task->await();
+```
+
+Para timers, I/O de streams, cancelamento, limites de concorrência e canais,
+consulte [`src/Loop/README.md`](src/Loop/README.md). `await()` executa o loop
+quando chamado fora de uma tarefa; dentro de uma tarefa, suspende apenas a Fiber
+atual.
+
+### Migração da versão anterior
+
+- O tipo retornado pelos métodos HTTP mudou de `Future` para `Task`.
+- A dependência Composer `omegaalfa/fiber-event-loop` foi removida.
+- Para injetar o loop, passe `Loop::get()`; normalmente basta deixar o cliente
+  usar essa instância automaticamente.
+- Imports de tipos do pacote externo devem ser substituídos pelos tipos de
+  `Omegaalfa\HttpClient\Loop`, como `Task` e `Loop`.
 
 ## Exemplo completo de uso
 
@@ -112,22 +152,22 @@ print_r($upload->json());
 ### Métodos HTTP
 
 ```php
-get(string $url, array $query = [], array $headers = []): Future
-head(string $url, array $query = [], array $headers = []): Future
-post(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
-put(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
-patch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
-delete(string $url, array $query = [], array $headers = []): Future
-request(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null): Future
-streamGet(string $url, array $query = [], array $headers = []): Future
-streamPost(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
-streamPut(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
-streamPatch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Future
-streamDelete(string $url, array $query = [], array $headers = []): Future
-streamRequest(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null): Future
-streamSseGet(string $url, array $query = [], array $headers = [], bool $requireDone = false, ?callable $completionDetector = null): Future
-streamSsePost(string $url, mixed $body = null, array $headers = [], bool $requireDone = false, ?callable $completionDetector = null): Future
-streamSseRequest(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null, bool $requireDone = false, ?callable $completionDetector = null): Future
+get(string $url, array $query = [], array $headers = []): Task
+head(string $url, array $query = [], array $headers = []): Task
+post(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
+put(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
+patch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
+delete(string $url, array $query = [], array $headers = []): Task
+request(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null): Task
+streamGet(string $url, array $query = [], array $headers = []): Task
+streamPost(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
+streamPut(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
+streamPatch(string $url, mixed $body = null, array $headers = [], array $files = [], ?MultipartBuilder $multipart = null): Task
+streamDelete(string $url, array $query = [], array $headers = []): Task
+streamRequest(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null): Task
+streamSseGet(string $url, array $query = [], array $headers = [], bool $requireDone = false, ?callable $completionDetector = null): Task
+streamSsePost(string $url, mixed $body = null, array $headers = [], bool $requireDone = false, ?callable $completionDetector = null): Task
+streamSseRequest(string $method, string $url, array $query = [], array $headers = [], mixed $body = null, array $files = [], ?MultipartBuilder $multipart = null, bool $requireDone = false, ?callable $completionDetector = null): Task
 ```
 
 > Requisições `HEAD` e respostas `204`, `205` e `304` nunca carregam corpo: o
@@ -137,11 +177,11 @@ streamSseRequest(string $method, string $url, array $query = [], array $headers 
 ### Concorrência
 
 ```php
-concurrent(array $tasks): Future
-parallel(array $futures): Future
-awaitAny(array $futures): Future
-race(array $futures): Future
-settled(array $futures): Future
+concurrent(array $tasks): Task
+parallel(array $futures): Task
+awaitAny(array $futures): Task
+race(array $futures): Task
+settled(array $futures): Task
 ```
 
 ### Configuração fluente
@@ -252,6 +292,10 @@ Resumo mental:
     de texto cru.
 
 ## Exemplos de uso por cenário
+
+Os exemplos abaixo mostram chamadas individuais da API. Para fluxos completos,
+incluindo tratamento de erros, paginação, limite de concorrência e download de
+arquivos grandes, veja o [guia prático](docs/USE_CASES.md).
 
 ### 1. GET com query string
 
@@ -418,6 +462,12 @@ foreach ($responses as $key => $response) {
 }
 ```
 
+Se uma requisição falhar, `awaitAll()` propaga a primeira exceção na ordem das
+chaves. As demais Tasks continuam executando, mas seus erros são considerados
+tratados pelo grupo e não aparecem depois como falhas não observadas. Cancelar a
+Task que está chamando `awaitAll()` não cancela automaticamente as requisições
+filhas; cancele-as explicitamente se esse for o comportamento desejado.
+
 ### 12. `awaitAny()` e `race()`
 
 ```php
@@ -444,7 +494,7 @@ echo $firstValue->status() . PHP_EOL;
 
 O vencedor é sempre o primeiro futuro a assentar de fato — nunca o primeiro da
 lista —, mesmo que os demais levem mais tempo. Se o primeiro a assentar tiver
-rejeitado, a exceção é propagada (use `settled()` para coletar todos os
+rejeitado, a exceção é propagada (use `awaitSettled()` para coletar todos os
 resultados sem lançar).
 
 ### 13. `awaitSettled()`
@@ -657,21 +707,21 @@ Também é possível injetar sua própria implementação de `TransportInterface
 
 ## Referência da API
 
-Os exemplos usam `await()` para obter o resultado de um `Future`. Isso executa o
-event loop até a operação terminar. Você pode iniciar várias requisições antes
-de aguardar seus resultados para que elas avancem em conjunto.
+Os métodos HTTP retornam um `Task`. `await()` obtém o resultado e executa o loop
+até a operação terminar. Você pode iniciar várias requisições antes de aguardar
+seus resultados para que elas avancem em conjunto. O loop padrão é singleton e
+está disponível em `Omegaalfa\HttpClient\Loop\Loop::get()`.
 
 ### AsyncHttpClient
 
 Normalmente, crie o cliente sem argumentos: `new AsyncHttpClient()`. O
-construtor também aceita `loop`, `options`, `connectionPool` e `transport` para
-integrar um event loop, opções, pool ou transporte próprios. Na maioria dos
-aplicativos, as opções fluentes são suficientes; `transport` é útil para testes
-e integrações especiais.
+construtor também aceita `Loop::get()`, `options`, `connectionPool` e `transport`.
+O loop próprio é singleton; use o transporte injetável para testes e integrações
+especiais.
 
 #### Requisições com resposta completa
 
-Todos os métodos abaixo devolvem `Future<Response>`. `Response` contém o corpo
+Todos os métodos abaixo devolvem `Task<Response>`. `Response` contém o corpo
 completo em memória. Status como 404 e 500 são devolvidos normalmente; eles não
 lançam exceções automaticamente.
 
@@ -693,7 +743,7 @@ defina `Content-Type: application/x-www-form-urlencoded`.
 
 `streamGet`, `streamPost`, `streamPut`, `streamPatch`, `streamDelete` e
 `streamRequest` aceitam os mesmos tipos de argumentos dos métodos completos
-correspondentes, mas devolvem `Future<StreamResponse>`. Use `readChunk()` para
+correspondentes, mas devolvem `Task<StreamResponse>`. Use `readChunk()` para
 receber partes do corpo ou `consume()` para juntá-las em uma string. Feche a
 resposta se parar de ler antes do fim. `consume()` guarda o corpo todo em memória;
 streaming não descomprime automaticamente `Content-Encoding: gzip`.
@@ -746,7 +796,7 @@ try {
 
 - `concurrent($tasks)`: agenda callbacks identificados por chave e devolve os
   resultados com as mesmas chaves.
-- `parallel($futures)`: aguarda todos os `Future` fornecidos e preserva as chaves.
+- `parallel($futures)`: aguarda todos os `Task` fornecidos e preserva as chaves.
 - `awaitAny($futures)`: devolve `['key' => ..., 'value' => ...]` do primeiro
   futuro concluído. Os outros futuros não são cancelados automaticamente.
 - `race($futures)`: como `awaitAny()`, mas devolve somente o valor vencedor.

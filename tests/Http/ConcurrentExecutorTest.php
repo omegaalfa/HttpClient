@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace Tests\Omegaalfa\HttpClient\Http;
 
-use Omegaalfa\FiberEventLoop\FiberEventLoop;
+use Omegaalfa\HttpClient\Loop\Loop;
+use Omegaalfa\HttpClient\Loop\Task;
 use Omegaalfa\HttpClient\Http\ConcurrentExecutor;
 use PHPUnit\Framework\TestCase;
 
@@ -12,12 +13,12 @@ final class ConcurrentExecutorTest extends TestCase
 {
     public function testAllResolvesAllFutures(): void
     {
-        $loop = new FiberEventLoop();
+        $loop = Loop::get();
         $executor = new ConcurrentExecutor($loop);
 
         $future = $executor->all([
-            'a' => $loop->async(static fn (): int => 1),
-            'b' => $loop->async(static fn (): int => 2),
+            'a' => new Task(static fn (): int => 1),
+            'b' => new Task(static fn (): int => 2),
         ]);
 
         self::assertSame(['a' => 1, 'b' => 2], $future->await());
@@ -25,11 +26,11 @@ final class ConcurrentExecutorTest extends TestCase
 
     public function testNamedHandlesFutureAndScalarReturnValues(): void
     {
-        $loop = new FiberEventLoop();
+        $loop = Loop::get();
         $executor = new ConcurrentExecutor($loop);
 
         $future = $executor->named([
-            'future' => static fn () => $loop->async(static fn (): string => 'ok'),
+            'future' => static fn () => new Task(static fn (): string => 'ok'),
             'scalar' => static fn (): string => 'done',
         ]);
 
@@ -38,14 +39,14 @@ final class ConcurrentExecutorTest extends TestCase
 
     public function testAnyReturnsFirstSettledFuture(): void
     {
-        $loop = new FiberEventLoop();
+        $loop = Loop::get();
         $executor = new ConcurrentExecutor($loop);
 
-        $fast = $loop->async(static function (): string {
+        $fast = new Task(static function (): string {
             return 'fast';
         });
-        $slow = $loop->async(function () use ($loop): string {
-            $loop->sleep(0.05);
+        $slow = new Task(static function (): string {
+            Loop::get()->sleep(0.05);
             return 'slow';
         });
 
@@ -56,14 +57,14 @@ final class ConcurrentExecutorTest extends TestCase
 
     public function testRaceReturnsFirstWinnerValue(): void
     {
-        $loop = new FiberEventLoop();
+        $loop = Loop::get();
         $executor = new ConcurrentExecutor($loop);
 
-        $fast = $loop->async(static function (): int {
+        $fast = new Task(static function (): int {
             return 1;
         });
-        $slow = $loop->async(function () use ($loop): int {
-            $loop->sleep(0.05);
+        $slow = new Task(static function (): int {
+            Loop::get()->sleep(0.05);
             return 2;
         });
 
@@ -72,11 +73,11 @@ final class ConcurrentExecutorTest extends TestCase
 
     public function testSettledCollectsBothStates(): void
     {
-        $loop = new FiberEventLoop();
+        $loop = Loop::get();
         $executor = new ConcurrentExecutor($loop);
 
-        $ok = $loop->async(static fn (): string => 'ok');
-        $fail = $loop->async(static function (): never {
+        $ok = new Task(static fn (): string => 'ok');
+        $fail = new Task(static function (): never {
             throw new \RuntimeException('err');
         });
 

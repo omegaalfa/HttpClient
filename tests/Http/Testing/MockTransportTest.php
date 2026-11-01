@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Omegaalfa\HttpClient\Http\Testing;
 
-use Omegaalfa\FiberEventLoop\FiberEventLoop;
+use Omegaalfa\HttpClient\Loop\Task;
 use Omegaalfa\HttpClient\Http\Headers;
 use Omegaalfa\HttpClient\Http\Request;
 use Omegaalfa\HttpClient\Http\RequestOptions;
@@ -121,13 +121,12 @@ final class MockTransportTest extends TestCase
 
     public function testMockedClientWorksWithoutEventLoopJuggling(): void
     {
-        $loop = new FiberEventLoop();
         $transport = new MockTransport(
             [new Response(200, new Headers(['Content-Type' => 'application/json']), '{"ok":true}')]
         );
 
         $request = new Request('GET', 'https://a.example.com/x', new Headers());
-        $future = $loop->async(static fn () => $transport->send($request, new RequestOptions()));
+        $future = new Task(static fn () => $transport->send($request, new RequestOptions()));
 
         self::assertSame(['ok' => true], await($future)->json());
     }

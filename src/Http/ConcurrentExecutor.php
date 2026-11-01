@@ -4,22 +4,26 @@ declare(strict_types=1);
 
 namespace Omegaalfa\HttpClient\Http;
 
-use Omegaalfa\FiberEventLoop\FiberEventLoop;
-use Omegaalfa\FiberEventLoop\Future;
+use Omegaalfa\HttpClient\Loop\Loop;
+use Omegaalfa\HttpClient\Loop\Task;
 
 final class ConcurrentExecutor
 {
-    public function __construct(private readonly FiberEventLoop $loop)
+    public function __construct(Loop $loop)
     {
+        // Tasks use the process-wide loop singleton; reject mismatched injection.
+        if ($loop !== Loop::get()) {
+            throw new \LogicException('ConcurrentExecutor must use the active Loop singleton.');
+        }
     }
 
     /**
-     * @param array<string|int, Future> $futures
-     * @return Future
+     * @param array<string|int, Task> $futures
+     * @return Task
      */
-    public function all(array $futures): Future
+    public function all(array $futures): Task
     {
-        return $this->loop->async(function () use ($futures) {
+        return new Task(function () use ($futures) {
             $results = [];
 
             foreach ($futures as $key => $future) {
@@ -31,45 +35,45 @@ final class ConcurrentExecutor
     }
 
     /**
-     * @param array<string|int, Future> $futures
-     * @return Future
+     * @param array<string|int, Task> $futures
+     * @return Task
      */
-    public function any(array $futures): Future
+    public function any(array $futures): Task
     {
-        return $this->loop->async(static fn () => awaitAny($futures));
+        return new Task(static fn () => awaitAny($futures));
     }
 
     /**
-     * @param array<string|int, Future> $futures
-     * @return Future
+     * @param array<string|int, Task> $futures
+     * @return Task
      */
-    public function race(array $futures): Future
+    public function race(array $futures): Task
     {
-        return $this->loop->async(static fn () => race($futures));
+        return new Task(static fn () => race($futures));
     }
 
     /**
-     * @param array<string|int, Future> $futures
-     * @return Future
+     * @param array<string|int, Task> $futures
+     * @return Task
      */
-    public function settled(array $futures): Future
+    public function settled(array $futures): Task
     {
-        return $this->loop->async(static fn () => awaitSettled($futures));
+        return new Task(static fn () => awaitSettled($futures));
     }
 
     /**
      * @param array<string|int, callable> $tasks
-     * @return Future
+     * @return Task
      */
-    public function named(array $tasks): Future
+    public function named(array $tasks): Task
     {
-        return $this->loop->async(function () use ($tasks) {
+        return new Task(function () use ($tasks) {
             $futures = [];
             foreach ($tasks as $key => $task) {
                 $result = $task();
-                $futures[$key] = $result instanceof Future
+                $futures[$key] = $result instanceof Task
                     ? $result
-                    : $this->loop->async(static fn () => $result);
+                    : new Task(static fn () => $result);
             }
 
             $resolved = [];

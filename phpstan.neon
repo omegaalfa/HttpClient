@@ -9,6 +9,6 @@ parameters:
         - src
         - tests
 
-    # Entradas de validação de API (ex.: awaitAny() valida instanceof Future em
+    # Entradas de validação de API (ex.: awaitAny() valida instanceof Task em
     # arrays vindos do usuário) são intencionais em runtime.
     treatPhpDocTypesAsCertain: false

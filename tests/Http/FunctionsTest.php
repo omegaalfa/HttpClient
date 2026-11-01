@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Tests\Omegaalfa\HttpClient\Http;
 
 use InvalidArgumentException;
-use Omegaalfa\FiberEventLoop\FiberEventLoop;
-use Omegaalfa\FiberEventLoop\Future;
+use Omegaalfa\HttpClient\Loop\Loop;
+use Omegaalfa\HttpClient\Loop\Task;
 use PHPUnit\Framework\TestCase;
 
 use function Omegaalfa\HttpClient\Http\await;
@@ -14,22 +14,21 @@ use function Omegaalfa\HttpClient\Http\awaitAll;
 use function Omegaalfa\HttpClient\Http\awaitAny;
 use function Omegaalfa\HttpClient\Http\awaitSettled;
 use function Omegaalfa\HttpClient\Http\race;
+use function Omegaalfa\HttpClient\Loop\awaitAll as loopAwaitAll;
 
 final class FunctionsTest extends TestCase
 {
-    public function testAwaitResolvesFutureValue(): void
+    public function testAwaitResolvesTaskValue(): void
     {
-        $loop = new FiberEventLoop();
-        $future = $loop->async(static fn (): int => 42);
+        $task = new Task(static fn (): int => 42);
 
-        self::assertSame(42, await($future));
+        self::assertSame(42, await($task));
     }
 
     public function testAwaitAllReturnsResolvedResultsKeepingKeys(): void
     {
-        $loop = new FiberEventLoop();
-        $f1 = $loop->async(static fn (): string => 'a');
-        $f2 = $loop->async(static fn (): string => 'b');
+        $f1 = new Task(static fn (): string => 'a');
+        $f2 = new Task(static fn (): string => 'b');
 
         self::assertSame(['first' => 'a', 'second' => 'b'], awaitAll([
             'first' => $f1,
@@ -40,7 +39,7 @@ final class FunctionsTest extends TestCase
     public function testAwaitAllThrowsOnInvalidInput(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('awaitAll expects only Future instances');
+        $this->expectExceptionMessage('awaitAll expects only Task instances');
 
         awaitAll(['no-future']);
     }
@@ -50,13 +49,99 @@ final class FunctionsTest extends TestCase
         self::assertSame([], awaitAll([]));
     }
 
-    public function testAwaitAnyReturnsFirstSettledFutureWithKey(): void
+    public function testAwaitAllObservesLaterChildFailuresAfterFirstFailure(): void
     {
-        $loop = new FiberEventLoop();
+        $firstError = new \RuntimeException('first failure');
+        $laterError = new \RuntimeException('later failure');
+        $first = new Task(static function () use ($firstError): never {
+            throw $firstError;
+        });
+        $later = new Task(static function () use ($laterError): never {
+            Loop::get()->sleep(0.005);
+            throw $laterError;
+        });
 
-        $slow = new Future($loop);
-        $fast = new Future($loop);
-        $fast->resolve('fast');
+        try {
+            awaitAll([$first, $later]);
+            self::fail('awaitAll should propagate the first child failure.');
+        } catch (\RuntimeException $error) {
+            self::assertSame($firstError, $error);
+        }
+
+        Loop::get()->run();
+
+        self::assertSame(Task::FAILED, $later->getState());
+        self::assertSame($laterError, $later->getError());
+    }
+
+    public function testAwaitAllWorksInsideAFiber(): void
+    {
+        $group = new Task(static function (): array {
+            $first = new Task(static fn (): string => 'first');
+            $second = new Task(static fn (): string => 'second');
+
+            return awaitAll(['left' => $first, 'right' => $second]);
+        });
+
+        self::assertSame(['left' => 'first', 'right' => 'second'], $group->await());
+    }
+
+    public function testLoopAwaitAllObservesLaterChildFailuresAfterFirstFailure(): void
+    {
+        $firstError = new \RuntimeException('first failure');
+        $laterError = new \RuntimeException('later failure');
+        $first = new Task(static function () use ($firstError): never {
+            throw $firstError;
+        });
+        $later = new Task(static function () use ($laterError): never {
+            Loop::get()->sleep(0.005);
+            throw $laterError;
+        });
+
+        try {
+            loopAwaitAll($first, $later);
+            self::fail('Loop awaitAll should propagate the first child failure.');
+        } catch (\RuntimeException $error) {
+            self::assertSame($firstError, $error);
+        }
+
+        Loop::get()->run();
+
+        self::assertSame(Task::FAILED, $later->getState());
+        self::assertSame($laterError, $later->getError());
+    }
+
+    public function testCancellingAwaitAllCallerDoesNotCancelChildTasks(): void
+    {
+        $child = new Task(static function (): string {
+            Loop::get()->sleep(0.005);
+            return 'child completed';
+        });
+        $groupCaller = new Task(static fn (): array => awaitAll([$child]));
+        $canceller = new Task(static function () use ($groupCaller): void {
+            Loop::get()->sleep(0.001);
+            $groupCaller->cancel();
+        });
+
+        try {
+            $groupCaller->await();
+            self::fail('The group caller should have been cancelled.');
+        } catch (\Omegaalfa\HttpClient\Loop\TaskCancelled) {
+            self::assertSame(Task::CANCELLED, $groupCaller->getState());
+        }
+
+        $canceller->await();
+        self::assertSame('child completed', $child->await());
+        self::assertSame(Task::COMPLETED, $child->getState());
+    }
+
+    public function testAwaitAnyReturnsFirstSettledTaskWithKey(): void
+    {
+        $slow = new Task(static function (): string {
+            Loop::get()->sleep(0.02);
+            return 'slow';
+        });
+        $fast = new Task(static fn (): string => 'fast');
 
         $result = awaitAny([
             'slow' => $slow,
@@ -69,61 +154,29 @@ final class FunctionsTest extends TestCase
 
     public function testAwaitAnyReturnsFirstSettledNotFirstInList(): void
     {
-        $loop = new FiberEventLoop();
-
-        // Nenhum assenta nos primeiros ticks baratos: o vencedor precisa ser o
-        // primeiro a assentar, não o primeiro da lista.
-        $slow = $loop->async(static function () use ($loop): string {
-            for ($i = 0; $i < 40_000; $i++) {
-                $loop->next();
-            }
-
+        $slow = new Task(static function (): string {
+            Loop::get()->sleep(0.03);
             return 'slow';
         });
-
-        $fast = $loop->async(static function () use ($loop): string {
-            for ($i = 0; $i < 20_000; $i++) {
-                $loop->next();
-            }
-
+        $fast = new Task(static function (): string {
+            Loop::get()->sleep(0.005);
             return 'fast';
         });
 
-        $result = await($loop->async(static fn (): array => awaitAny(['slow' => $slow, 'fast' => $fast])));
+        $result = awaitAny(['slow' => $slow, 'fast' => $fast]);
 
         self::assertSame('fast', $result['key']);
         self::assertSame('fast', $result['value']);
     }
 
-    public function testAwaitAnyResolvesFirstSettledFutureOutsideFiber(): void
+    public function testAwaitAnyResolvesFirstSettledTaskOutsideFiber(): void
     {
-        $loop = new FiberEventLoop();
-
-        // Espera no padrão do cliente (timer + suspensão via next()), como o
-        // polling de socket faz durante I/O real.
-        $slow = $loop->async(static function () use ($loop): string {
-            $done = false;
-            $loop->after(static function () use (&$done): void {
-                $done = true;
-            }, 0.3);
-
-            while (!$done) {
-                $loop->next();
-            }
-
+        $slow = new Task(static function (): string {
+            Loop::get()->sleep(0.3);
             return 'slow';
         });
-
-        $fast = $loop->async(static function () use ($loop): string {
-            $done = false;
-            $loop->after(static function () use (&$done): void {
-                $done = true;
-            }, 0.05);
-
-            while (!$done) {
-                $loop->next();
-            }
-
+        $fast = new Task(static function (): string {
+            Loop::get()->sleep(0.05);
             return 'fast';
         });
 
@@ -138,21 +191,19 @@ final class FunctionsTest extends TestCase
 
     public function testRaceReturnsWinnerValue(): void
     {
-        $loop = new FiberEventLoop();
-
-        $f1 = new Future($loop);
-        $f2 = new Future($loop);
-        $f1->resolve('winner');
+        $f1 = new Task(static fn (): string => 'winner');
+        $f2 = new Task(static function (): string {
+            Loop::get()->sleep(0.02);
+            return 'loser';
+        });
 
         self::assertSame('winner', race([$f1, $f2]));
     }
 
-    public function testAwaitSettledCollectsFulfilledAndRejectedFutures(): void
+    public function testAwaitSettledCollectsFulfilledAndRejectedTasks(): void
     {
-        $loop = new FiberEventLoop();
-
-        $ok = $loop->async(static fn (): int => 10);
-        $fail = $loop->async(static function (): never {
+        $ok = new Task(static fn (): int => 10);
+        $fail = new Task(static function (): never {
             throw new \RuntimeException('boom');
         });
 

@@ -4,132 +4,122 @@ declare(strict_types=1);
 
 namespace Omegaalfa\HttpClient\Http;
 
-use Fiber;
 use InvalidArgumentException;
-use Omegaalfa\FiberEventLoop\Future;
+use Omegaalfa\HttpClient\Loop\BoundedChannel;
+use Omegaalfa\HttpClient\Loop\Task;
 use Throwable;
 
-function await(Future $future): mixed
+/**
+ * @throws Throwable
+ */
+function await(Task $task): mixed
 {
-    return $future->await();
+    return $task->await();
 }
 
 /**
- * @param array<array-key, mixed> $futures
+ * @param array<array-key, mixed> $tasks
  * @return array<array-key, mixed>
  */
-function awaitAll(array $futures): array
+function awaitAll(array $tasks): array
 {
-    if ($futures === []) {
-        return [];
-    }
-
-    foreach ($futures as $future) {
-        if (!$future instanceof Future) {
-            throw new InvalidArgumentException('awaitAll expects only Future instances');
+    foreach ($tasks as $task) {
+        if (!$task instanceof Task) {
+            throw new InvalidArgumentException('awaitAll expects only Task instances');
         }
     }
 
+    // The group owns every child's failure, including later children that
+    // won't be awaited if an earlier child rejects.
+    foreach ($tasks as $task) {
+        $task->markObserved();
+    }
+
     $results = [];
-    foreach ($futures as $key => $future) {
-        $results[$key] = $future->await();
+    foreach ($tasks as $key => $task) {
+        $results[$key] = $task->await();
     }
 
     return $results;
 }
 
 /**
- * Retorna o primeiro futuro a assentar (resolvido ou rejeitado). O vencedor é
- * sempre o primeiro a assentar de fato — nunca o primeiro da lista —, mesmo que
- * os demais levem mais tempo.
+ * Return the first task to settle, preserving its key and value.
+ * A rejected first task is rethrown, matching Task::await().
  *
- * @param array<string|int, Future> $futures
+ * @param array<string|int, Task> $tasks
  * @return array{key: string|int, value: mixed}
  */
-function awaitAny(array $futures): array
+function awaitAny(array $tasks): array
 {
-    if ($futures === []) {
-        throw new InvalidArgumentException('awaitAny expects at least one Future');
+    if ($tasks === []) {
+        throw new InvalidArgumentException('awaitAny expects at least one Task');
     }
 
-    $first = null;
-    foreach ($futures as $future) {
-        if (!$future instanceof Future) {
-            throw new InvalidArgumentException('awaitAny expects only Future instances');
-        }
-
-        $first ??= $future;
-        if ($future->getLoop() !== $first->getLoop()) {
-            throw new InvalidArgumentException('awaitAny expects futures bound to the same event loop');
+    foreach ($tasks as $task) {
+        if (!$task instanceof Task) {
+            throw new InvalidArgumentException('awaitAny expects only Task instances');
         }
     }
 
-    $loop = $first->getLoop();
-
-    $firstSettled = static function () use ($futures, $loop): array {
-        while (true) {
-            foreach ($futures as $key => $future) {
-                if (!$future->isSettled()) {
-                    continue;
-                }
-
-                return [
-                    'key' => $key,
-                    'value' => $future->await(),
-                ];
+    $channel = new BoundedChannel(count($tasks));
+    $observers = [];
+    foreach ($tasks as $key => $task) {
+        $observers[] = new Task(static function () use ($key, $task, $channel): void {
+            try {
+                $result = ['key' => $key, 'value' => $task->await()];
+            } catch (Throwable $error) {
+                $result = ['key' => $key, 'error' => $error];
             }
 
-            $loop->next();
-        }
-    };
-
-    if (Fiber::getCurrent() !== null) {
-        return $firstSettled();
+            $channel->send($result);
+        });
     }
 
-    // Fora de fiber, next() não avança o loop: o polling roda dentro de um
-    // fiber próprio e o run() do await() externo é encerrado no vencedor.
-    $driver = $loop->async(static function () use ($firstSettled, $loop): array {
-        try {
-            return $firstSettled();
-        } finally {
-            $loop->stop();
+    try {
+        /** @var array{key: string|int, value?: mixed, error?: Throwable} $winner */
+        $winner = new Task(static fn (): mixed => $channel->receive())->await();
+    } catch (Throwable $e) {
+        throw $e;
+    } finally {
+        foreach ($observers as $observer) {
+            $observer->cancel();
         }
-    });
+    }
 
-    return $driver->await();
+    if (isset($winner['error'])) {
+        throw $winner['error'];
+    }
+
+    return ['key' => $winner['key'], 'value' => $winner['value'] ?? null];
 }
 
-/**
- * @param array<string|int, Future> $futures
+/** @param array<string|int, Task> $tasks
+ * @throws Throwable
  */
-function race(array $futures): mixed
+function race(array $tasks): mixed
 {
-    return awaitAny($futures)['value'];
+    return awaitAny($tasks)['value'];
 }
 
 /**
- * @param array<string|int, Future> $futures
+ * @param array<string|int, Task> $tasks
  * @return array<array-key, array{state: 'fulfilled', value: mixed}|array{state: 'rejected', reason: Throwable}>
  */
-function awaitSettled(array $futures): array
+function awaitSettled(array $tasks): array
 {
-    if ($futures === []) {
-        return [];
-    }
-
-    foreach ($futures as $future) {
-        if (!$future instanceof Future) {
-            throw new InvalidArgumentException('awaitSettled expects only Future instances');
+    foreach ($tasks as $task) {
+        if (!$task instanceof Task) {
+            throw new InvalidArgumentException('awaitSettled expects only Task instances');
         }
     }
 
     $results = [];
-    foreach ($futures as $key => $future) {
+    foreach ($tasks as $key => $task) {
         try {
             $results[$key] = [
                 'state' => 'fulfilled',
-                'value' => $future->await(),
+                'value' => $task->await(),
             ];
         } catch (Throwable $exception) {
             $results[$key] = [

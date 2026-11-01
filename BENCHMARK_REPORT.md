@@ -1,7 +1,7 @@
 # Relatório de Benchmark e Análise de Performance: HttpClient
 
 > **Ferramenta:** `php benchmark.php` — 8 cenários comparando **Omegaalfa HttpClient**
-> (streams + Fibers + `FiberEventLoop`) vs **Guzzle 7** (extensão cURL via `curl_multi`).
+> (streams + Fibers + loop próprio) vs **Guzzle 7** (extensão cURL via `curl_multi`).
 > Ambiente: PHP 8.5.4 (CLI), WSL2/Linux, servidores locais de teste com
 > `PHP_CLI_SERVER_WORKERS=16` em `127.0.0.1`. Iterações: 500 (batch de 25, warmup 50).
 >
@@ -23,7 +23,7 @@ representativa de comportamento HTTP. O cliente completou os cenários sem falha
 10 MB de pico acumulado. A seção 10 registra a rodada posterior à integração da Public
 Suffix List e do resolvedor RFC 3986; a seção 8 preserva a comparação histórica.
 
-O código atual espera prontidão de sockets via `HttpClientEventLoop`, faz o connect TCP e
+O código atual espera prontidão de sockets via `Omegaalfa\HttpClient\Loop\Loop`, faz o connect TCP e
 handshake TLS sem bloquear a Fiber, limita headers HTTP/SSE e aplica as correções de
 redirect, formulário, timeout e isolamento de cookies descritas na seção 9. Cada coluna
 de comparação da seção 8 vem de uma execução;
@@ -123,9 +123,8 @@ consumo reportado é o pico acumulado do processo e não uma medida de memória 
 
 ## 4. Correções incluídas nesta revisão
 
-- O event loop padrão aguarda readiness de leitura/escrita e acorda todos os Fibers
-  correspondentes no mesmo ciclo. O fallback de polling continua disponível para loops
-  injetados que não implementem SocketReadinessInterface.
+- O loop próprio `Omegaalfa\HttpClient\Loop\Loop` aguarda readiness de leitura/escrita
+  sem consumir bytes antecipadamente; não há fallback de polling no transporte.
 - Conexões HTTPS usam TCP não bloqueante e handshake TLS cooperativo com o event loop.
   O caminho foi validado por testes HTTPS locais, inclusive via proxy CONNECT.
 - Headers HTTP têm limites de 64 KiB e 100 linhas; linhas SSE têm limite de 64 KiB.
@@ -141,8 +140,8 @@ consumo reportado é o pico acumulado do processo e não uma medida de memória 
 - A resolução DNS do PHP ainda pode bloquear antes do connect TCP.
 - A Public Suffix List estática precisa ser atualizada em releases; a lista não é baixada
   durante as requisições. Em ambientes multi-tenant, também isole os cookie jars.
-- O fallback de polling permanece para event loops customizados sem SocketReadinessInterface;
-  o event loop padrão do cliente usa readiness.
+- O loop de I/O é parte da biblioteca e expõe `Task`; a dependência externa
+  `omegaalfa/fiber-event-loop` foi removida. O loop é obtido por `Loop::get()`.
 - Para conclusões de performance, rode o benchmark pelo menos três vezes em uma máquina
   ociosa e compare medianas. TLS padrão usa loopback; para medir DNS e rede externa,
   configure o modo remoto. Esses resultados dependem do ambiente e não são previsão direta
@@ -184,7 +183,7 @@ clientes usam os mesmos timeouts, keep-alive, limite de redirects e negociação
 sem compressão. O aquecimento inclui chamadas seriais e uma onda concorrente.
 
 As medições seriais alternam qual cliente roda primeiro; os lotes também
-alternam a ordem e iniciam o cronômetro antes de criar Futures/promises. O padrão
+alternam a ordem e iniciam o cronômetro antes de criar Tasks/promises. O padrão
 é coletar 100 amostras de lote. P95/P99 e média dos cenários concorrentes são
 tempos por lote, não por request. Throughput conta apenas respostas bem-sucedidas;
 qualquer falha invalida a execução. O valor de memória continua sendo o pico
@@ -256,11 +255,11 @@ validação exaustiva de todas as extensões e casos-limite dos protocolos.
 
 ### Aplicado
 
-- O `HttpClientEventLoop` registra sockets por recurso, espera readiness com
-  `stream_select` bloqueante quando não há trabalho pronto e retoma todos os Fibers
-  sinalizados no mesmo ciclo. O caminho padrão do cliente não faz polling cooperativo.
-- Para compatibilidade, um loop injetado que não implemente `SocketReadinessInterface`
-  ainda usa o fallback cooperativo de polling em `SocketTransport` e `StreamResponse`.
+- O loop próprio `Omegaalfa\HttpClient\Loop\Loop` registra waits de leitura/escrita e
+  usa `stream_select` bloqueante quando não há tarefas prontas. O caminho padrão não faz
+  polling cooperativo nem depende de alterações em `vendor/`.
+- A API assíncrona usa `Task` (`await`, `awaitAll`, `awaitAny`, `race` e `awaitSettled`);
+  chamadas que aguardam I/O fora de uma Fiber são conduzidas pelo loop incluído.
 - Conexões HTTPS são abertas como TCP não bloqueante; o handshake TLS aguarda leitura do
   socket antes de tentar novamente. Os testes locais cobrem HTTPS direto e via CONNECT.
 - Respostas são rejeitadas acima de 64 KiB/100 linhas de headers; linhas SSE acima de
@@ -278,8 +277,8 @@ validação exaustiva de todas as extensões e casos-limite dos protocolos.
 - A resolução DNS do PHP ainda pode bloquear antes da conexão TCP.
 - A Public Suffix List distribuída é um snapshot e não se atualiza sozinha; atualize o arquivo
   em releases periódicos. Aplicações multi-tenant também devem isolar seus cookie jars.
-- O fallback de polling permanece para event loops injetados sem `SocketReadinessInterface`;
-  o event loop padrão do cliente usa o caminho orientado a readiness.
+- `Loop` é singleton obtido com `Loop::get()` e pode ser injetado em `AsyncHttpClient`;
+  a dependência `omegaalfa/fiber-event-loop` não é mais necessária.
 - Os números de performance são de uma rodada por estado. Para decisões de release
   baseadas em diferença pequena, rode pelo menos três vezes em máquina ociosa e compare
   medianas; DNS remoto e proxies reais dependem do ambiente e só são medidos quando
@@ -307,3 +306,53 @@ O resolvedor retorna imediatamente quando não há `baseUrl`; parsing de URI só
 quando essa opção está configurada. A PSL é carregada sob demanda e reutilizada no
 processo, portanto a primeira resposta com um atributo `Domain` paga o custo de inicialização.
 O benchmark padrão não mede isoladamente esse caminho frio nem cookies cross-domain.
+
+
+## 11. Migração para o loop incluído
+
+A partir desta revisão, o cliente usa `Omegaalfa\HttpClient\Loop\Loop` e `Task`,
+implementados em `src/Loop`. A dependência `omegaalfa/fiber-event-loop` foi removida
+do `composer.json`; nenhuma alteração em `vendor/` é necessária. A API assíncrona
+retorna `Task` em vez de `Future`, e consumidores devem atualizar os tipos/imports
+correspondentes. Esta mudança de tipo público pode exigir uma versão major.
+
+### Medição sem JIT após a migração
+
+Executado com `php -dxdebug.mode=off benchmark.php`, PHP 8.5.4, OPcache CLI desligado,
+JIT desativado, 500 iterações, 100 amostras de lote, 16 workers e 50 warmups. O baseline
+“Antes” é a seção 10 (código imediatamente anterior à migração); “Depois” é esta execução.
+As execuções foram únicas e em datas/condições de carga diferentes, portanto a comparação
+é indicativa, não uma conclusão estatística. Todos os cenários completaram sem erros;
+foram 6.300 respostas HTTP de performance bem-sucedidas no HttpClient e pico de memória acumulado de
+8–10 MB.
+
+| Cenário | Antes RPS | Depois RPS | Δ RPS | Antes P95 (ms) | Depois P95 (ms) | Δ P95 |
+|---|---:|---:|---:|---:|---:|---:|
+| Serial pequeno | 1.460,52 | 1.449,01 | −0,8% | 0,7690 | 0,8100 | +5,3% |
+| Batch pequeno | 1.941,89 | 2.428,96 | +25,1% | 14,6116 | 11,4506 | −21,6% |
+| Latência 10 ms | 91,71 | 92,31 | +0,7% | 11,0926 | 10,9775 | −1,0% |
+| Payload 100 KB | 1.222,69 | 1.292,17 | +5,7% | 0,9725 | 0,8688 | −10,7% |
+| Endpoint lento 150 ms | 6,61 | 6,61 | 0,0% | 151,4904 | 151,4090 | −0,1% |
+| Batch + latência | 767,66 | 483,83 | −37,0% | 32,9323 | 69,0427 | +109,7% |
+
+O resultado confirma que o loop incluído passa os cenários funcionais e preserva ou melhora
+cinco dos seis throughputs nesta rodada, mas também revela regressão importante em
+“Batch + latência”. O ganho do batch pequeno não compensa esse caso de uso. A migração do
+loop não deve ser divulgada como sem perda de performance até que esse cenário seja
+investigado e medido em múltiplas execuções controladas.
+
+### Investigação da regressão de concorrência
+
+Em novas execuções sem Xdebug, o cenário “Batch + latência” ficou entre 480 e 485 req/s,
+com P95 entre 69 e 70 ms, enquanto a execução pré-migração registrada na seção 10 obteve
+768 req/s e P95 de 32,93 ms. O batch pequeno variou mais entre rodadas, mas não mostrou a
+mesma queda consistente. Desativar Xdebug e OPcache/JIT não removeu a diferença.
+
+Foram testadas duas hipóteses: agregar as esperas de `awaitAll()` em uma única Task e
+reutilizar arrays de streams no `StreamSelectDriver`. Os resultados do lote com latência
+permaneceram em aproximadamente 485 e 481 req/s, respectivamente, sem melhora mensurável;
+as duas alterações experimentais foram revertidas. Isso aponta para custo/ordem de
+agendamento do novo Loop, e não para reconstrução dos arrays ou múltiplas entradas em
+`Loop::run()` como causa principal. A confirmação exige perfil por fase (início das Tasks,
+connect, readiness e leitura) comparando os dois schedulers sob o mesmo servidor e a mesma
+carga; até lá, esta regressão permanece aberta.

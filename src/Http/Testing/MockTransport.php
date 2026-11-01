@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Omegaalfa\HttpClient\Http\Testing;
 
-use Omegaalfa\FiberEventLoop\FiberEventLoop;
 use Omegaalfa\HttpClient\Http\ConnectionPool;
 use Omegaalfa\HttpClient\Http\Headers;
 use Omegaalfa\HttpClient\Http\Request;
@@ -12,6 +11,7 @@ use Omegaalfa\HttpClient\Http\RequestOptions;
 use Omegaalfa\HttpClient\Http\Response;
 use Omegaalfa\HttpClient\Http\StreamResponse;
 use Omegaalfa\HttpClient\Http\TransportInterface;
+use Omegaalfa\HttpClient\Loop\Loop;
 use RuntimeException;
 use Throwable;
 
@@ -109,7 +109,7 @@ final class MockTransport implements TransportInterface
         string $body,
         int $status = 200,
         array|Headers $headers = [],
-        ?FiberEventLoop $loop = null
+        ?Loop $loop = null
     ): StreamResponse {
         $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
         if ($sockets === false) {
@@ -121,7 +121,7 @@ final class MockTransport implements TransportInterface
         fclose($write);
 
         return new StreamResponse(
-            $loop ?? new FiberEventLoop(),
+            $loop ?? Loop::get(),
             new ConnectionPool(),
             $read,
             new RequestOptions(),
